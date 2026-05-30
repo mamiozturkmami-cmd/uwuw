@@ -811,9 +811,72 @@ def show_key_manager_ui(chat_id, mid):
     txt = "🔑 *LİSANS MOTORU*\n\nSüre seçin:"
     kb = InlineKeyboardMarkup(row_width=3).add(InlineKeyboardButton("1 Gün", callback_data="adm_gen_1"), InlineKeyboardButton("7 Gün", callback_data="adm_gen_7"), InlineKeyboardButton("30 Gün", callback_data="adm_gen_30")).add(InlineKeyboardButton("🔙 Panel", callback_data="adm_dashboard"))
     bot.edit_message_text(txt, chat_id=chat_id, message_id=mid, parse_mode="Markdown", reply_markup=kb)
+# --- EKSİK FONKSİYON TANIMLARI ---
 
-# ======================================================================
-# NEXT STEP HANDLERS (KULLANICI GİRDİ YÖNETİMİ)
-# ======================================================================
+def step_receive_combo_file(message):
+    chat_id = message.chat.id
+    uid = message.from_user.id
+    target_mod = user_states.get(uid)
+    
+    if not target_mod:
+        bot.send_message(chat_id, "⚠️ Hata: Modül seçimi kayboldu.")
+        return
 
-def step_receive_
+    combos = []
+    if message.document:
+        try:
+            file_info = bot.get_file(message.document.file_id)
+            downloaded = bot.download_file(file_info.file_path)
+            combos = downloaded.decode('utf-8', errors='ignore').splitlines()
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ Dosya okuma hatası: {e}")
+            return
+    elif message.text:
+        combos = message.text.splitlines()
+    
+    combos = [c.strip() for c in combos if ":" in c]
+    
+    if not combos:
+        bot.send_message(chat_id, "❌ Geçerli combo bulunamadı.")
+        return
+        
+    bot.send_message(chat_id, f"🚀 *{target_mod.upper()}* taraması başlatılıyor. {len(combos)} hesap işlenecek.", parse_mode="Markdown")
+    threading.Thread(target=core_pipeline_executor, args=(chat_id, combos, target_mod)).start()
+
+def step_bulk_proxy_save(message):
+    chat_id = message.chat.id
+    uid = message.from_user.id
+    state = user_states.get(uid, "")
+    
+    if not state.startswith("addproxy_"): return
+    p_type = state.split("_")[1]
+    
+    raw_data = ""
+    if message.document:
+        try:
+            file_info = bot.get_file(message.document.file_id)
+            raw_data = bot.download_file(file_info.file_path).decode('utf-8', errors='ignore')
+        except:
+            bot.send_message(chat_id, "❌ Dosya okunamadı.")
+            return
+    else:
+        raw_data = message.text
+        
+    lines = [l.strip() for l in raw_data.splitlines() if l.strip()]
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    for line in lines:
+        try:
+            cursor.execute("INSERT OR IGNORE INTO proxies (proxy_str, proxy_type) VALUES (?, ?)", (line, p_type))
+        except: continue
+    conn.commit()
+    conn.close()
+    
+    proxy_pool.reload_pool()
+    bot.send_message(chat_id, f"✅ {len(lines)} adet {p_type.upper()} proxy havuza eklendi!")
+
+# --- BOTU BAŞLATMA SATIRI ---
+if __name__ == "__main__":
+    print("Chester Enterprise Bot Aktif.")
+    bot.infinity_polling(none_stop=True)
