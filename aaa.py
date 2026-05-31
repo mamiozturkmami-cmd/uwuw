@@ -679,7 +679,8 @@ def handle_incoming_data(message):
         bot.send_message(chat_id, f"✅ Duyuru başarıyla {success} kişiye ulaştı.", reply_markup=build_admin_keyboard(uid))
         return
 
-    # ADMIN: Proxy Veri Aktarımı
+I 
+                # ADMIN: Proxy Veri Aktarımı (Zorlayıcı Yenileme Modu)
     if state.startswith("wait_proxy_") and is_admin(uid):
         p_type = state.split("_")[2]
         raw_text = ""
@@ -696,18 +697,24 @@ def handle_incoming_data(message):
             
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
+        
+        # Havuzu temizlemek istersen alt satırdaki yorum satırını kaldırabilirsin:
+        # cursor.execute("DELETE FROM proxies WHERE proxy_type = ?", (p_type,))
+        
         sc = 0
         for line in lines:
             try:
-                cursor.execute("INSERT OR IGNORE INTO proxies (proxy_str, proxy_type) VALUES (?, ?)", (line, p_type))
-                if cursor.rowcount > 0: sc += 1
+                # INSERT OR IGNORE yerine REPLACE kullanarak veritabanını zorla güncelliyoruz
+                cursor.execute("REPLACE INTO proxies (proxy_str, proxy_type) VALUES (?, ?)", (line, p_type))
+                sc += 1
             except: pass
         conn.commit()
         conn.close()
         sys_pool.reload_all()
         set_state(uid, None)
-        bot.send_message(chat_id, f"✅ {sc} adet yeni {p_type} proxy havuza eklendi.", reply_markup=build_admin_keyboard(uid))
+        bot.send_message(chat_id, f"✅ {sc} adet {p_type} proxy başarıyla sisteme işlendi ve aktif edildi!", reply_markup=build_admin_keyboard(uid))
         return
+
 
     # KULLANICI: Tarayıcı Combo Veri Alımı
     if state.startswith("run_"):
