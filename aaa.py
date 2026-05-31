@@ -41,7 +41,7 @@ urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
 
 # --- KRİTİK KONFİGÜRASYONLAR ---
-BOT_TOKEN = "BURAYA_TOKEN_GIRIN"
+BOT_TOKEN = "7697030798:AAHiTipLyZu7HCjJnCFu5CEgAHYaqP64ha4"
 FOUNDER_ID = 8664147577  # Kurucu Telegram ID'si
 DB_NAME = "ultimate_checker.db"
 
