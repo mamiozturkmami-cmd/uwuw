@@ -28,14 +28,13 @@ bot = telebot.TeleBot(BOT_TOKEN)
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
 PROXIES_FILE = "proxies.txt"
-CHANNELS_FILE = "force_channels.json"  # YENİ: Zorunlu kanallar için dosya
 
 # Memory Caches
 user_sessions = {}  
 active_tasks = {}   
 user_hits = {} 
-user_2fa = {}       
-user_errors = {}    
+user_2fa = {}       # YENİ: 2FA hesapları önbellekte tutmak için eklendi
+user_errors = {}    # YENİ: Hata veren hesapları önbellekte tutmak için eklendi
 
 # Threading & Request Settings (Adjusted for High Performance)
 MAX_RETRIES = 3
@@ -53,9 +52,9 @@ global_proxy_index = 0
 # =====================================================================
 # --- FILE MANAGEMENT SYSTEM ---
 # =====================================================================
-for file in [KEYS_FILE, USERS_FILE, CHANNELS_FILE]:
+for file in [KEYS_FILE, USERS_FILE]:
     if not os.path.exists(file):
-        with open(file, 'w') as f: json.dump({}, f) if file != CHANNELS_FILE else json.dump([], f)
+        with open(file, 'w') as f: json.dump({}, f)
 if not os.path.exists(PROXIES_FILE):
     with open(PROXIES_FILE, 'w') as f: f.write("")
 
@@ -71,31 +70,11 @@ def load_proxies():
             return [line.strip() for line in f if line.strip()]
     return []
 
-def load_channels():
-    if os.path.exists(CHANNELS_FILE):
-        return load_json(CHANNELS_FILE)
-    return []
-
 def check_user_access(user_id):
     users = load_json(USERS_FILE)
     if str(user_id) == str(ADMIN_ID): return True
     if str(user_id) in users and users[str(user_id)]["expiry"] > time.time(): return True
     return False
-
-def check_force_join(user_id):
-    """Kullanıcının zorunlu kanallara abone olup olmadığını kontrol eder."""
-    if str(user_id) == str(ADMIN_ID): return True
-    channels = load_channels()
-    if not channels: return True
-    
-    for channel in channels:
-        try:
-            member = bot.get_chat_member(channel, user_id)
-            if member.status in ['left', 'kicked']:
-                return False
-        except Exception:
-            pass # Bot kanalda ekli değilse veya yetkisi yoksa yoksay
-    return True
 
 # =====================================================================
 # --- XBOX CHECKER ENGINE (DIRECTLY FROM YOUR CLI SCRIPT) ---
@@ -284,38 +263,8 @@ def admin_keyboard():
     markup.add(
         types.InlineKeyboardButton("🔑 Generate Key", callback_data="adm_gen_key"),
         types.InlineKeyboardButton("📜 List Keys", callback_data="adm_list_keys"),
-        types.InlineKeyboardButton("🌐 Manage Proxies", callback_data="adm_proxies_menu"),
-        types.InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast"),
-        types.InlineKeyboardButton("🔒 Force Channels", callback_data="adm_channels")
+        types.InlineKeyboardButton("🌐 Manage Proxies", callback_data="adm_proxies")
     )
-    return markup
-
-def proxy_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("➕ Add Proxies", callback_data="adm_proxies_add"),
-        types.InlineKeyboardButton("🗑️ Clear Proxies", callback_data="adm_proxies_clear"),
-        types.InlineKeyboardButton("📊 View Proxies", callback_data="adm_proxies_view"),
-        types.InlineKeyboardButton("🔙 Back", callback_data="adm_back")
-    )
-    return markup
-    
-def channels_menu_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("➕ Add Channel", callback_data="adm_chan_add"),
-        types.InlineKeyboardButton("🗑️ Clear Channels", callback_data="adm_chan_clear"),
-        types.InlineKeyboardButton("📊 View Channels", callback_data="adm_chan_view"),
-        types.InlineKeyboardButton("🔙 Back", callback_data="adm_back")
-    )
-    return markup
-
-def force_join_keyboard(channels):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    for channel in channels:
-        # channel genelde @kanal_adi seklindedir
-        url = f"https://t.me/{channel.replace('@', '')}"
-        markup.add(types.InlineKeyboardButton(f"Join {channel}", url=url))
     return markup
 
 # =====================================================================
@@ -324,12 +273,6 @@ def force_join_keyboard(channels):
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.from_user.id
-    
-    if not check_force_join(user_id):
-        channels = load_channels()
-        bot.send_message(message.chat.id, "⚠️ **You must join our channels to use this bot!**\nPlease join the channels below and try `/start` again.", parse_mode="Markdown", reply_markup=force_join_keyboard(channels))
-        return
-
     welcome_text = "💤 **Welcome to Sleeping Xbox Checker Bot!** 💤\n\n"
     if check_user_access(user_id):
         welcome_text += "Your access is active! You can use the menu to start checking.\nType `/stop` to abort an ongoing scan."
@@ -418,17 +361,13 @@ def admin_panel_trigger(message):
 def admin_callback_handler(call):
     if str(call.from_user.id) != str(ADMIN_ID): return
     
-    if call.data == "adm_back":
-        bot.edit_message_text("🎛️ **Admin Control Center:**", call.message.chat.id, call.message.message_id, reply_markup=admin_keyboard(), parse_mode="Markdown")
-    
-    elif call.data == "adm_gen_key":
+    if call.data == "adm_gen_key":
         markup = types.InlineKeyboardMarkup()
         markup.add(
             types.InlineKeyboardButton("1 Day", callback_data="gen_86400"),
             types.InlineKeyboardButton("7 Days", callback_data="gen_604800"),
             types.InlineKeyboardButton("30 Days", callback_data="gen_2592000")
         )
-        markup.add(types.InlineKeyboardButton("🔙 Back", callback_data="adm_back"))
         bot.edit_message_text("🔑 Select the duration for the new key:", call.message.chat.id, call.message.message_id, reply_markup=markup)
         
     elif call.data == "adm_list_keys":
@@ -442,47 +381,11 @@ def admin_callback_handler(call):
                 count += 1
             if count >= 15: break
         if count == 0: text += "No active unused keys available."
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Back", callback_data="adm_back"))
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
         
-    elif call.data == "adm_proxies_menu":
-        bot.edit_message_text("🌐 **Proxy Management:**", call.message.chat.id, call.message.message_id, reply_markup=proxy_menu_keyboard(), parse_mode="Markdown")
-        
-    elif call.data == "adm_proxies_view":
+    elif call.data == "adm_proxies":
         proxies = load_proxies()
         bot.answer_callback_query(call.id, f"🌐 Total Proxies Loaded: {len(proxies)}", show_alert=True)
-        
-    elif call.data == "adm_proxies_clear":
-        with open(PROXIES_FILE, 'w') as f: f.write("")
-        bot.answer_callback_query(call.id, "🗑️ All proxies cleared!", show_alert=True)
-        
-    elif call.data == "adm_proxies_add":
-        msg = bot.edit_message_text("Send me the proxies to add.\nFormat: `IP:PORT` or `IP:PORT:USER:PASS` or `protocol://...`\n*(Send as a text message or a .txt file)*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-        bot.register_next_step_handler(msg, process_add_proxies)
-        
-    elif call.data == "adm_channels":
-        bot.edit_message_text("🔒 **Force Join Channels Management:**", call.message.chat.id, call.message.message_id, reply_markup=channels_menu_keyboard(), parse_mode="Markdown")
-        
-    elif call.data == "adm_chan_view":
-        channels = load_channels()
-        if not channels:
-            text = "No force join channels set."
-        else:
-            text = "📋 **Current Force Channels:**\n" + "\n".join(channels)
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Back", callback_data="adm_channels"))
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-        
-    elif call.data == "adm_chan_clear":
-        save_json(CHANNELS_FILE, [])
-        bot.answer_callback_query(call.id, "🗑️ All channels cleared!", show_alert=True)
-        
-    elif call.data == "adm_chan_add":
-        msg = bot.edit_message_text("Send the channel username (e.g., `@MyChannel`):", call.message.chat.id, call.message.message_id)
-        bot.register_next_step_handler(msg, process_add_channel)
-        
-    elif call.data == "adm_broadcast":
-        msg = bot.edit_message_text("Send the message you want to broadcast to all registered users:", call.message.chat.id, call.message.message_id)
-        bot.register_next_step_handler(msg, process_broadcast)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("gen_"))
 def process_key_generation(call):
@@ -494,85 +397,15 @@ def process_key_generation(call):
     keys[generated_key] = {"duration": duration, "used": False, "used_by": None}
     save_json(KEYS_FILE, keys)
     
-    markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Back", callback_data="adm_back"))
-    bot.edit_message_text(f"✅ **Key Successfully Generated!**\n\n`{generated_key}`\n\nThe user can activate it using `/redeem {generated_key}`.", call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
-def process_add_proxies(message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    
-    proxies_to_add = []
-    if message.document:
-        try:
-            file_info = bot.get_file(message.document.file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            raw_text = downloaded_file.decode('utf-8', errors='ignore')
-            proxies_to_add = [line.strip() for line in raw_text.splitlines() if line.strip()]
-        except Exception as e:
-            bot.send_message(message.chat.id, f"❌ Error reading file: {e}")
-            return
-    elif message.text:
-        proxies_to_add = [line.strip() for line in message.text.splitlines() if line.strip()]
-        
-    if not proxies_to_add:
-        bot.send_message(message.chat.id, "No valid proxies found.")
-        return
-        
-    with proxy_lock:
-        current_proxies = load_proxies()
-        # Append new proxies
-        with open(PROXIES_FILE, 'a') as f:
-            for p in proxies_to_add:
-                f.write(p + "\n")
-                
-    bot.send_message(message.chat.id, f"✅ Added `{len(proxies_to_add)}` proxies. Total: `{len(current_proxies) + len(proxies_to_add)}`", parse_mode="Markdown")
-
-def process_add_channel(message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    channel = message.text.strip()
-    if not channel.startswith("@"):
-        bot.send_message(message.chat.id, "❌ Channel must start with `@` (e.g., `@MyChannel`)")
-        return
-        
-    channels = load_channels()
-    if channel not in channels:
-        channels.append(channel)
-        save_json(CHANNELS_FILE, channels)
-        bot.send_message(message.chat.id, f"✅ Channel `{channel}` added to force join list.", parse_mode="Markdown")
-    else:
-        bot.send_message(message.chat.id, "⚠️ Channel already exists.")
-
-def process_broadcast(message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    users = load_json(USERS_FILE)
-    text = message.text
-    
-    bot.send_message(message.chat.id, f"📢 Broadcasting to {len(users)} users...")
-    success = 0
-    for user_id in users:
-        try:
-            bot.send_message(user_id, f"📢 **Announcement**\n\n{text}", parse_mode="Markdown")
-            success += 1
-            time.sleep(0.05) # Prevent flood limits
-        except:
-            pass
-            
-    bot.send_message(message.chat.id, f"✅ Broadcast completed. Sent to {success}/{len(users)} users.")
+    bot.edit_message_text(f"✅ **Key Successfully Generated!**\n\n`{generated_key}`\n\nThe user can activate it using `/redeem {generated_key}`.", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 # =====================================================================
 # --- CHECKER FLOW & COMBO PARSING ---
 # =====================================================================
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Start Scan")
 def start_checker_flow(message):
-    user_id = message.from_user.id
-    
-    if not check_force_join(user_id):
-        channels = load_channels()
-        bot.send_message(message.chat.id, "⚠️ **You must join our channels to use this bot!**", parse_mode="Markdown", reply_markup=force_join_keyboard(channels))
-        return
-        
-    if not check_user_access(user_id): return
-    
-    if active_tasks.get(user_id, False):
+    if not check_user_access(message.from_user.id): return
+    if active_tasks.get(message.from_user.id, False):
         bot.send_message(message.chat.id, "⚠️ You already have an ongoing scan. Use `/stop` to abort it first.", parse_mode="Markdown")
         return
         
@@ -621,8 +454,8 @@ def handle_combos(message):
             bot.send_message(message.chat.id, f"🔥 `{len(combos)}` accounts detected.\nStarting high-speed execution with `{THREAD_COUNT}` concurrent threads...\n\n⛔ Type `/stop` anytime to halt execution and retrieve hits.")
             
             user_hits[user_id] = []
-            user_2fa[user_id] = []       
-            user_errors[user_id] = []    
+            user_2fa[user_id] = []       # YENİ: 2FA Dizisini Başlat
+            user_errors[user_id] = []    # YENİ: Error Dizisini Başlat
             active_tasks[user_id] = True
             
             # Start background orchestrator using ThreadPoolExecutor pattern
@@ -635,27 +468,6 @@ def handle_combos(message):
 # =====================================================================
 # --- THREAD POOL WORKER & ORCHESTRATOR ---
 # =====================================================================
-def format_proxy(proxy_str):
-    """Admin tarafından eklenen proxy'yi requests için uygun formata dönüştürür"""
-    proxy_str = proxy_str.strip()
-    if not proxy_str: return None
-    
-    # Eğer zaten protocol:// varsa onu kullan, yoksa http say
-    if "://" in proxy_str:
-        return {"http": proxy_str, "https": proxy_str}
-        
-    parts = proxy_str.split(":")
-    if len(parts) == 2:
-        ip, port = parts
-        formatted = f"http://{ip}:{port}"
-    elif len(parts) == 4:
-        ip, port, user, pw = parts
-        formatted = f"http://{user}:{pw}@{ip}:{port}"
-    else:
-        formatted = f"http://{proxy_str}" # Fallback
-        
-    return {"http": formatted, "https": formatted}
-
 def process_single_combo(user_id, combo, mode, proxies_list, stats, total, chat_id, status_msg):
     global global_proxy_index
     
@@ -680,10 +492,7 @@ def process_single_combo(user_id, combo, mode, proxies_list, stats, total, chat_
             with proxy_lock:
                 p = proxies_list[global_proxy_index % len(proxies_list)]
                 global_proxy_index += 1
-            
-            formatted_px = format_proxy(p)
-            if formatted_px:
-                session.proxies = formatted_px
+            session.proxies = {"http": f"http://{p}", "https://{p}": f"http://{p}"}
             
         url_post, sftag = get_sftag(session)
         if not url_post or not sftag:
