@@ -34,7 +34,7 @@ user_hits = {} # Hitleri biriktirmek için
 # İstek ayarları (İstek üzerine timeout 5 saniyeye düşürüldü)
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 10
-MAX_THREADS = 30  # Aynı anda çalışacak maksimum thread sayısı
+MAX_THREADS = 15 # Aynı anda çalışacak maksimum thread sayısı
 
 # Çoklu iş parçacığı güvenliği için kilitler (Locks)
 stats_lock = Lock()
