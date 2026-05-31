@@ -679,8 +679,7 @@ def handle_incoming_data(message):
         bot.send_message(chat_id, f"✅ Duyuru başarıyla {success} kişiye ulaştı.", reply_markup=build_admin_keyboard(uid))
         return
 
-I 
-                # ADMIN: Proxy Veri Aktarımı (Zorlayıcı Yenileme Modu)
+    # ADMIN: Proxy Veri Aktarımı (Zorlayıcı Yenileme Modu)
     if state.startswith("wait_proxy_") and is_admin(uid):
         p_type = state.split("_")[2]
         raw_text = ""
@@ -714,7 +713,6 @@ I
         set_state(uid, None)
         bot.send_message(chat_id, f"✅ {sc} adet {p_type} proxy başarıyla sisteme işlendi ve aktif edildi!", reply_markup=build_admin_keyboard(uid))
         return
-
 
     # KULLANICI: Tarayıcı Combo Veri Alımı
     if state.startswith("run_"):
