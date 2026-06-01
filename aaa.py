@@ -19,7 +19,7 @@ from datetime import datetime
 urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
 
-BOT_TOKEN = "7697030798:AAHiTipLyZu7HCjJnCFu5CEgAHYaqP64ha4"
+BOT_TOKEN = "7697030798:AAEnhgKcWlVPK1mevjdswNNl46IUNQoFVzE"
 ADMIN_ID = 8664147577
 
 bot = telebot.TeleBot(BOT_TOKEN)
