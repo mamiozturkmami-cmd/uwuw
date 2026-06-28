@@ -21,7 +21,7 @@ TOKEN = "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4"
 SFTAG_URL = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 5
-MAX_CONCURRENT_TASKS = 20  # Railway CPU/RAM sınırları için optimize edilmiş eşzamanlılık
+MAX_CONCURRENT_TASKS = 20  # Sunucu limitleri için optimize edildi
 
 class Stats:
     def __init__(self):
@@ -401,12 +401,10 @@ async def handle_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         async def worker(combo):
             async with semaphore:
-                # Eşzamanlı istekleri asenkron havuzda koştur
                 await check_account(combo, context, chat_id)
 
         tasks = [asyncio.create_task(worker(combo)) for combo in combos]
         
-        # Sürekli arayüz güncelleme döngüsü
         while not all(t.done() for t in tasks):
             await asyncio.sleep(5)
             try:
@@ -431,14 +429,16 @@ async def handle_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(run_checker())
 
 def main():
-    # v20+ modern Application mimarisi
+    # Railway loop kilitlenme korumalı asenkron builder mimarisi
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_docs))
 
-    print("Bot modern asenkron yapıda çalışıyor...")
-    application.run_polling()
+    print("Bot aktif, Railway üzerinde dinleniyor...")
+    
+    # Döngü çakışmalarını engelleyen güvenli polling tetikleyicisi
+    application.run_polling(close_loop=False, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
