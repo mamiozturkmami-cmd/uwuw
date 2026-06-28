@@ -340,16 +340,18 @@ def check_account(combo):
 
 # -------------------- BOT İÇİN YARDIMCI FONKSİYON --------------------
 def get_stats_panel():
-    return f"""📊 **İstatistikler**
-─────────────────
-✅ Kontrol Edilen: {stats.checked}
-🎯 Hit: {stats.hits}
-❌ Bad: {stats.bad}
-🔒 2FA/Güvenlik: {stats.twofa}
-💎 XGP Ultimate: {stats.xgpu}
-🎮 XGP: {stats.xgp}
-📦 Diğer: {stats.other}
-⚠️ Hata: {stats.errors}
-🔄 Tekrar Deneme: {stats.retries}
-⚡ CPM: {stats.get_cpm()}
-─────────────────
+    return (
+        "📊 Istatistikler\n"
+        "─────────────────\n"
+        f"✅ Kontrol Edilen: {stats.checked}\n"
+        f"🎯 Hit: {stats.hits}\n"
+        f"❌ Bad: {stats.bad}\n"
+        f"🔒 2FA/Guvenlik: {stats.twofa}\n"
+        f"💎 XGP Ultimate: {stats.xgpu}\n"
+        f"🎮 XGP: {stats.xgp}\n"
+        f"📦 Diger: {stats.other}\n"
+        f"⚠️ Hata: {stats.errors}\n"
+        f"🔄 Tekrar Deneme: {stats.retries}\n"
+        f"⚡ CPM: {stats.get_cpm()}\n"
+        "─────────────────"
+    )
