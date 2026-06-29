@@ -24,7 +24,11 @@ warnings.filterwarnings("ignore")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# 🚀 ÇÖZÜM 1: Botu çoklu thread (Threaded) desteğiyle ayağa kaldırıyoruz!
+bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=10)
+
+# 🔒 ÇÖZÜM 2: Aynı anda birden fazla edit isteği çakışıp paneli dondurmasın diye kilit koyuyoruz
+panel_lock = threading.Lock()
 
 # Ağ kopmalarına karşı en katı istek koruması
 session_tg = requests.Session()
@@ -434,16 +438,23 @@ def generate_panel_text(context):
     )
 
 def live_refresh_loop(context):
-    """Ana kilitlenmeyi çözen, saniyede 1 kez stabil çalışan ekran tazeleyici döngü"""
+    """⏱️ ÇÖZÜM 3: İstediğin 3 saniyelik stabil ekran tazeleyici döngüsü"""
+    last_text = ""
     while context.is_running and context.checked < context.total:
         text = generate_panel_text(context)
-        if context.message_id:
-            safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
-        time.sleep(1.2) # Telegram hız limitine çarpmayan altın süre oranı
+        
+        # Sadece yazı gerçekten değiştiyse Telegram API'ye istek yollayıp paneli güncelliyoruz
+        if text != last_text and context.message_id:
+            with panel_lock:
+                safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
+            last_text = text
+            
+        time.sleep(3.0) # Tam istediğin gibi 3 saniyede bir ekranı tazeleyecek altın oran
 
     # Tarama bittiğinde son halini basıyoruz
     text = generate_panel_text(context)
-    safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
+    with panel_lock:
+        safe_bot_call(bot.edit_message_text, text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
     
     safe_bot_call(bot.send_message, context.chat_id, "📦 *Tarama bitti! Dosyalarınız temizlenerek oluşturuluyor...*", parse_mode="Markdown")
     
@@ -519,7 +530,6 @@ def handle_all(message):
         context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
         active_scans[chat_id] = context
 
-        # 🚨 HATA ÇÖZÜMÜ: Mesajı direkt oluşturup ID'sini anında context'e yazıyoruz
         text_ilk = generate_panel_text(context)
         init_msg = safe_bot_call(bot.send_message, chat_id, text_ilk, reply_markup=main_keyboard(user_id), parse_mode="Markdown")
         
@@ -545,5 +555,6 @@ def handle_callbacks(call):
 
 if __name__ == "__main__":
     safe_bot_call(bot.remove_webhook)
+    # 🚀 ÇÖZÜM 4: Polling yaparken botun çoklu threadleri işlemesini sağlıyoruz
     bot.infinity_polling(skip_pending=True)
 
