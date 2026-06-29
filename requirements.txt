@@ -1,6 +1,5 @@
+pyTelegramBotAPI==4.22.1
+requests==2.32.3
+Flask==3.0.3
+gunicorn==22.0.0
 requests
-urllib3
-rich
-colorama
-python-telegram-bot==20.7
-pyTelegramBotAPI
