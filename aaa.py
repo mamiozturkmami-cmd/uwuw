@@ -24,8 +24,8 @@ warnings.filterwarnings("ignore")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
-# 🚀 Eşzamanlı istek kilitlenmelerini engellemek için thread havuzu ve kilit ekledik
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=10)
+# En kararlı bot tanımı
+bot = telebot.TeleBot(BOT_TOKEN)
 panel_lock = threading.Lock()
 
 # Ağ kopmalarına karşı en katı istek koruması
