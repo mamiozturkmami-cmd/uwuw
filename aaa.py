@@ -913,5 +913,14 @@ def process_broadcast(message):
 # ==========================================
 if __name__ == "__main__":
     print("🤖 Metal Checker Bot has been started successfully on Telegram context.")
-    bot.infinity_polling()
-
+    
+    # 409 Conflict hatasını engellemek için eski olası bağlantıları/webhookları temizliyoruz
+    try:
+        bot.remove_webhook()
+    except Exception as e:
+        print(f"Webhook removal skip: {e}")
+        
+    time.sleep(1) # Kısa bir bekleme süresi tanıyoruz
+    
+    # non_stop ve skip_pending ile çakışmaları ve birikmiş eski mesajları pas geçiyoruz
+    bot.infinity_polling(non_stop=True, skip_pending=True)
