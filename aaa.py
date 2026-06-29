@@ -648,10 +648,13 @@ def generate_panel_text(context):
     )
 
 def background_execution_pool(context):
-    """Tarama bittiğinde AUTOMATICALLY (otomatikman) sonuç txt'lerini fırlatan motor"""
+    """Tarama bittiğinde 1 saniye bekleyip sonuçları otomatik fırlatan motor"""
     with concurrent.futures.ThreadPoolExecutor(max_workers=35) as executor:
         futures = [executor.submit(check_account_bot, context, cb) for cb in context.combos]
         concurrent.futures.wait(futures)
+    
+    # ⏱️ KRİTİK EKLENTİ: İşçiler dağılmadan önce sistemin kendine gelmesi için 1 saniye mola
+    time.sleep(1) 
     
     with database_lock:
         db["stats_global"]["total_checked_accounts"] += context.checked
@@ -659,6 +662,9 @@ def background_execution_pool(context):
         db["stats_global"]["total_bad_accounts"] += context.bad
         db["stats_global"]["total_2fa_accounts"] += context.twofa
         save_db()
+
+    # ... (Buradan sonrası aynı)
+
 
     # Tarama sonu raporunu gönder
     safe_bot_call(bot.send_message, context.chat_id, get_text(context.user_id, "scan_completed_msg"), parse_mode="Markdown")
