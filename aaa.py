@@ -512,30 +512,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
-async def handle_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Txt veri girişlerini yakalar (accounts.txt veya proxy.txt)"""
-    document = update.message.document
-    file = await context.bot.get_file(document.file_id)
-    file_bytes = await file.download_as_bytearray()
-    content = file_bytes.decode('utf-8')
-    
-    lines = [line.strip() for line in content.split('\n') if line.strip()]
-    
-    if "account" in document.file_name.lower() or (lines and ":" in lines[0] and "@" not in lines[0]):
-        with STATE.lock:
-            STATE.accounts = []
-            for line in lines:
-                if ":" in line:
-                    parts = line.split(":", 1)
-                    STATE.accounts.append((parts[0], parts[1]))
-        await update.message.reply_text(f"✅ *{len(STATE.accounts)}* Adet hesap başarıyla hafızaya yüklendi!", parse_mode="Markdown")
-    
-    elif "proxy" in document.file_name.lower() or (lines and (lines[0].count(":") == 3 or "@" in lines[0])):
-        with STATE.lock:
-            STATE.proxies = lines
-        await update.message.reply_text(f"✅ *{len(STATE.proxies)}* Adet proxy başarıyla havuzu güncelledi!", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ Tanınmayan dosya formatı. Lütfen combo veya proxy listenizi gönderin.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Menü tıklama lojikleri"""
@@ -569,6 +545,33 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "bot_stop":
         STATE.is_running = False
         await query.edit_message_text("🛑 Durdurma sinyali gönderildi. Aktif threadlerin bitmesi bekleniyor...")
+
+async def handle_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Txt veri girişlerini yakalar (accounts.txt veya proxy.txt)"""
+    document = update.message.document
+    file = await context.bot.get_file(document.file_id)
+    file_bytes = await file.download_as_bytearray()
+    content = file_bytes.decode('utf-8')
+    
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    
+    # E-posta formatı tespiti (İçinde @ ve : geçen satırlar hesaptır)
+    if "account" in document.file_name.lower() or (lines and "@" in lines[0] and ":" in lines[0]):
+        with STATE.lock:
+            STATE.accounts = []
+            for line in lines:
+                if ":" in line:
+                    parts = line.split(":", 1)
+                    STATE.accounts.append((parts[0], parts[1]))
+        await update.message.reply_text(f"✅ *{len(STATE.accounts)}* Adet hesap başarıyla hafızaya yüklendi!", parse_mode="Markdown")
+    
+    # Proxy formatı tespiti (3 adet iki nokta üst üste varsa veya dosya adında proxy geçiyorsa)
+    elif "proxy" in document.file_name.lower() or (lines and lines[0].count(":") == 3):
+        with STATE.lock:
+            STATE.proxies = lines
+        await update.message.reply_text(f"✅ *{len(STATE.proxies)}* Adet proxy başarıyla havuzu güncelledi!", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Tanınmayan dosya formatı. Lütfen combo veya proxy listenizi gönderin.")
 
 # ============================================================================
 # LIVE ENGINE PANEL & EVENT LOOP
