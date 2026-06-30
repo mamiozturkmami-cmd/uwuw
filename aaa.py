@@ -145,7 +145,7 @@ class MetalDropsEngine:
                              allow_redirects=True, timeout=15)
 
             url_m = re.search(r'urlPost":"([^"]+)"', r2.text)
-            ppft_m = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
+            ppft_m = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)'2, r2.text)
             if not url_m or not ppft_m:
                 return {"status": "BAD", "data": {}}
 
@@ -774,7 +774,7 @@ def license_generation_time_allocation_processor(call):
     uid = call.from_user.id
     if uid not in db["admins"] and uid != OWNER_ID: return
 
-    allocation = call.data.replace("cb_gen_", "")
+    allocation = call.data.replace("cb_gen_", "").strip()
     if allocation == "custom":
         prompt = bot.send_message(call.message.chat.id, "🔢 Provide custom active range day mapping parameter (integer format):")
         bot.register_next_step_handler(prompt, process_custom_days_generation_input)
@@ -783,21 +783,35 @@ def license_generation_time_allocation_processor(call):
     days_map = {"1": 1, "3": 3, "7": 7, "30": 30, "90": 90, "inf": -1}
     label_map = {"1": "1 Day", "3": "3 Days", "7": "1 Week", "30": "1 Month", "90": "3 Months", "inf": "Infinite Lifetime"}
 
-    target_days = days_map.get(allocation, 1)
-    target_label = label_map.get(allocation, "1 Day")
+    if allocation not in days_map:
+        try:
+            bot.answer_callback_query(call.id, "❌ Invalid allocation parameter.")
+        except Exception: pass
+        return
+
+    target_days = days_map[allocation]
+    target_label = label_map[allocation]
     token = f"METAL-{str(uuid.uuid4()).upper()[:16]}"
 
-    with db_lock:
-        db["keys"][token] = {"duration": target_label, "days": target_days, "used_by": None}
+    try:
+        with db_lock:
+            if "keys" not in db:
+                db["keys"] = {}
+            db["keys"][token] = {"duration": target_label, "days": target_days, "used_by": None}
         save_database()
 
-    bot.edit_message_text(
-        f"✅ *License Configuration Deployed Matrix:*\n\n"
-        f"🔑 *Key Token:* `{token}`\n"
-        f"⏱️ *Scope Duration:* `{target_label}`",
-        call.message.chat.id, call.message.message_id,
-        parse_mode="Markdown"
-    )
+        bot.edit_message_text(
+            f"✅ *License Configuration Deployed Matrix:*\n\n"
+            f"🔑 *Key Token:* `{token}`\n"
+            f"⏱️ *Scope Duration:* `{target_label}`",
+            call.message.chat.id, call.message.message_id,
+            parse_mode="Markdown"
+        )
+        try:
+            bot.answer_callback_query(call.id, "✅ Key generated successfully!")
+        except Exception: pass
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"❌ Key generation failed: {str(e)}")
 
 def process_custom_days_generation_input(message):
     try:
@@ -808,10 +822,15 @@ def process_custom_days_generation_input(message):
         return
 
     token = f"METAL-CUSTOM-{str(uuid.uuid4()).upper()[:12]}"
-    with db_lock:
-        db["keys"][token] = {"duration": f"{days} Custom Days", "days": days, "used_by": None}
+    try:
+        with db_lock:
+            if "keys" not in db:
+                db["keys"] = {}
+            db["keys"][token] = {"duration": f"{days} Custom Days", "days": days, "used_by": None}
         save_database()
-    bot.send_message(message.chat.id, f"✅ *Custom Token Issued:*\n\n🔑 Key: `{token}`\n⏱️ Frame: `{days} Days`")
+        bot.send_message(message.chat.id, f"✅ *Custom Token Issued:*\n\n🔑 Key: `{token}`\n⏱️ Frame: `{days} Days`", parse_mode="Markdown")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Custom key generation failed: {str(e)}")
 
 def process_administrative_subscription_strip(message):
     target = message.text.strip() if message.text else ""
