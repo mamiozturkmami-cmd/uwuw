@@ -491,6 +491,9 @@ async def handle_sorting_input(message: types.Message, state: FSMContext):
 # START LOOP EXECUTION
 # ============================================================================
 async def main():
+    # Telegram sunucusunda asılı kalan eski hayalet bağlantıyı ve biriken mesajları siler
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("🚀 Eski oturumlar temizlendi, bot sorunsuz başlıyor!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
