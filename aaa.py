@@ -145,7 +145,7 @@ class MetalDropsEngine:
                              allow_redirects=True, timeout=15)
 
             url_m = re.search(r'urlPost":"([^"]+)"', r2.text)
-            ppft_m = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)'2, r2.text)
+            ppft_m = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
             if not url_m or not ppft_m:
                 return {"status": "BAD", "data": {}}
 
