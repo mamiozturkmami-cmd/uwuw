@@ -795,7 +795,8 @@ def license_generation_time_allocation_processor(call):
         f"✅ *License Configuration Deployed Matrix:*\n\n"
         f"🔑 *Key Token:* `{token}`\n"
         f"⏱️ *Scope Duration:* `{target_label}`",
-        call.message.chat.id, call.message.message_id
+        call.message.chat.id, call.message.message_id,
+        parse_mode="Markdown"
     )
 
 def process_custom_days_generation_input(message):
