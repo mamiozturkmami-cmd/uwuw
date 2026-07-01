@@ -582,7 +582,13 @@ if __name__ == "__main__":
     print("  Powered by: Metal Drops                            ")
     print("=====================================================")
     
-    # drop_pending_updates=True: Bot kapalıyken gelen eski birikmiş mesajları siler,
-    # böylece açılır açılmaz boğulmaz ve çakışmaları en aza indirir.
-    bot.infinity_polling(timeout=60, drop_pending_updates=True)
+    try:
+        # Eski birikmiş mesaj kuyruğunu ve çakışmaları otomatik temizler
+        bot.delete_webhook(drop_pending_updates=True)
+        time.sleep(1) 
+    except Exception as error_msg:
+        # Hata oluşursa kod çökmez, hatayı 'error_msg' olarak loglara yazar
+        print(f"[!] Webhook cleanup warning: {error_msg}")
 
+    # Botu hiçbir parametre hatası vermeyecek şekilde yalın olarak başlatır
+    bot.infinity_polling()
