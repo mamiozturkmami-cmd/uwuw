@@ -465,11 +465,12 @@ def process_combo_input(message, mode, threads):
         "chat_id": message.chat.id,
         "rm": rm,
         "start_time": time.time(),
-        "last_update_time": 0,  # Throttling kontrolü için eklendi
+        "last_update_time": 0, 
         "is_running": True,
         "check_mode": mode,
         "threads": threads
     }
+
 
     with state_lock:
         active_scans[message.from_user.id] = scan_state
@@ -530,11 +531,14 @@ def update_live_results(user_id):
     if not state: return
 
     current_time = time.time()
-    # İlk hesap bittiği saniye anında tetiklenir, sonraki isteklerde en az 2 saniye geçmesini şart koşar
-    if state["checked"] > 1 and (current_time - state["last_update_time"] < 2.0) and state["checked"] != state["total"]:
+    
+    # 1. İlk hesap kontrol edildiğinde ANINDA tetiklenir (böylece o "yükleniyor" yazısı hemen gider)
+    # 2. Sonraki kontrollerde Telegram API'yi yormamak için EN AZ 5 SANİYE geçmesini bekler.
+    # 3. Liste tamamen bittiğinde son durumu ekrana basmak için süreyi bypass eder.
+    if state["checked"] > 1 and (current_time - state["last_update_time"] < 5.0) and state["checked"] != state["total"]:
         return
 
-    # Zaman kaydını kilitle
+    # Son güncelleme zamanını kaydet
     with state_lock:
         state["last_update_time"] = current_time
 
@@ -576,9 +580,10 @@ def update_live_results(user_id):
         )
     
     try:
+        # Doğrudan tek bir kanaldan edit atar, thread patlaması yaşatmaz
         bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
     except Exception:
-        # Telegram Flood/Rate limits oluşursa arka plan akışının çökmesini önler
+        # Olası bir anlık Telegram block durumunda botun ve havuzun kilitlenmesini engeller
         pass
 
 def finalize_scan_session(user_id):
