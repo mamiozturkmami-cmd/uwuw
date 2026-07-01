@@ -581,5 +581,8 @@ if __name__ == "__main__":
     print("  Developer: @vantrexXxx                             ")
     print("  Powered by: Metal Drops                            ")
     print("=====================================================")
-    bot.infinity_polling(timeout=60)
+    
+    # drop_pending_updates=True: Bot kapalıyken gelen eski birikmiş mesajları siler,
+    # böylece açılır açılmaz boğulmaz ve çakışmaları en aza indirir.
+    bot.infinity_polling(timeout=60, drop_pending_updates=True)
 
