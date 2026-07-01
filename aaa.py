@@ -465,6 +465,7 @@ def process_combo_input(message, mode, threads):
         "chat_id": message.chat.id,
         "rm": rm,
         "start_time": time.time(),
+        "last_update_time": 0,  # Throttling kontrolü için eklendi
         "is_running": True,
         "check_mode": mode,
         "threads": threads
@@ -489,7 +490,6 @@ def run_checker_pool(user_id, accounts):
         email, password = acc
         checker = UnifiedChecker(check_mode=state["check_mode"])
         
-        # Tam zırhlı try-except koruması: Fonksiyon ne dönerse dönsün sayaç kilitlenmeyecek
         try:
             res = checker.check(email, password)
         except Exception as e:
@@ -516,7 +516,7 @@ def run_checker_pool(user_id, accounts):
             else:
                 state["bads"] += 1
 
-            # İlk hesaptan itibaren anında canlı güncellemeyi tetikler
+            # Her hesap kontrolü bittiğinde güvenli tetikleyiciyi çağır
             update_live_results(user_id)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -529,7 +529,16 @@ def update_live_results(user_id):
         state = active_scans.get(user_id)
     if not state: return
 
-    elapsed = time.time() - state["start_time"]
+    current_time = time.time()
+    # İlk hesap bittiği saniye anında tetiklenir, sonraki isteklerde en az 2 saniye geçmesini şart koşar
+    if state["checked"] > 1 and (current_time - state["last_update_time"] < 2.0) and state["checked"] != state["total"]:
+        return
+
+    # Zaman kaydını kilitle
+    with state_lock:
+        state["last_update_time"] = current_time
+
+    elapsed = current_time - state["start_time"]
     cpm = (state["checked"] / elapsed) * 60 if elapsed > 0 else 0
     
     if state["check_mode"] == "inbox":
@@ -566,12 +575,11 @@ def update_live_results(user_id):
             "🟢 _Processing framework threads dynamically..._"
         )
     
-    # Telegram API kilitlenmesini engellemek için safe execution
-    def safe_edit():
-        try: bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
-        except: pass
-    
-    threading.Thread(target=safe_edit).start()
+    try:
+        bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
+    except Exception:
+        # Telegram Flood/Rate limits oluşursa arka plan akışının çökmesini önler
+        pass
 
 def finalize_scan_session(user_id):
     with state_lock:
