@@ -147,23 +147,59 @@ class UnifiedChecker:
                         'Minecraft': {'type': 'MINECRAFT REALMS', 'category': 'gaming'}
                     }
                     
-                    for keyword, info in subscription_keywords.items():
-                        if keyword in response_text:
-                            sub_info = {'name': info['type'], 'category': info['category']}
-                            title_match = re.search(r'"title"\s*:\s*"([^"]+)"', response_text)
-                            if title_match: sub_info['title'] = title_match.group(1)
-                            
-                            renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', response_text)
-                            if renewal_match:
-                                renewal_date = renewal_match.group(1)
-                                sub_info['renewal_date'] = renewal_date
-                                days_remaining = self.get_remaining_days(renewal_date + "T00:00:00Z")
-                                sub_info['days_remaining'] = days_remaining
-                                if days_remaining != "?" and int(days_remaining) <= 0:
-                                    sub_info['is_expired'] = True
+                    items = []
+                    try:
+                        js = r_sub.json()
+                        if isinstance(js, list):
+                            items = js
+                        elif isinstance(js, dict):
+                            if 'value' in js and isinstance(js['value'], list):
+                                items = js['value']
+                            elif 'items' in js and isinstance(js['items'], list):
+                                items = js['items']
+                            else:
+                                items = [js]
+                    except:
+                        items = []
+                        blocks = response_text.split('}')
+                        for b in blocks:
+                            if 'title' in b or any(k in b for k in subscription_keywords):
+                                items.append(b + '}')
+                    
+                    for item in items:
+                        item_str = json.dumps(item) if isinstance(item, (dict, list)) else str(item)
+                        for keyword, info in subscription_keywords.items():
+                            if keyword in item_str:
+                                sub_info = {'name': info['type'], 'category': info['category']}
+                                
+                                if isinstance(item, dict) and 'title' in item and item['title']:
+                                    sub_info['title'] = str(item['title'])
                                 else:
-                                    sub_info['is_expired'] = False
-                            subscriptions.append(sub_info)
+                                    title_match = re.search(r'"title"\s*:\s*"([^"]+)"', item_str)
+                                    if title_match: sub_info['title'] = title_match.group(1)
+                                    else: sub_info['title'] = keyword
+                                    
+                                renewal_date = None
+                                if isinstance(item, dict):
+                                    renewal_date = item.get('nextRenewalDate', item.get('renewalDate'))
+                                    if renewal_date and 'T' in renewal_date:
+                                        renewal_date = renewal_date.split('T')[0]
+                                        
+                                if not renewal_date:
+                                    renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', item_str)
+                                    if renewal_match:
+                                        renewal_date = renewal_match.group(1)
+                                        
+                                if renewal_date:
+                                    sub_info['renewal_date'] = renewal_date
+                                    days_remaining = self.get_remaining_days(renewal_date + "T00:00:00Z")
+                                    sub_info['days_remaining'] = days_remaining
+                                    if days_remaining != "?" and int(days_remaining) <= 0:
+                                        sub_info['is_expired'] = True
+                                    else:
+                                        sub_info['is_expired'] = False
+                                subscriptions.append(sub_info)
+                                break
                             
                     if subscriptions:
                         active_subs = [s for s in subscriptions if not s.get('is_expired', False)]
@@ -892,10 +928,18 @@ class ResultManager:
             zip_name = f"{self.base_folder}.zip"
             shutil.make_archive(self.base_folder, 'zip', self.base_folder)
             return [zip_name], True
-        elif self.mode in ["code_fetch", "code_fetch_val", "code_sort"]:
-            zip_name = f"{self.base_folder}_CODES.zip"
-            shutil.make_archive(self.base_folder, 'zip', self.base_folder)
-            return [zip_name], True
+        elif self.mode == "code_fetch":
+            dest = "fetched_codes.txt"
+            if os.path.exists(self.fetched_codes_file):
+                shutil.copy(self.fetched_codes_file, dest)
+                return [dest], False
+            return [], False
+        elif self.mode == "code_fetch_val":
+            dest = "valid_codes.txt"
+            if os.path.exists(self.valid_codes_file):
+                shutil.copy(self.valid_codes_file, dest)
+                return [dest], False
+            return [], False
         else:
             files_to_send = []
             if self.mode == "microsoft":
@@ -1126,15 +1170,17 @@ def run_code_operations(chat_id, accounts, config):
         bot.send_message(chat_id, "📦 Metal Codes paketi hazırlanıyor...")
         files_to_send, is_zip = result_mgr.get_delivery_files()
         
-        if is_zip and files_to_send:
-            with open(files_to_send[0], 'rb') as f:
-                bot.send_document(chat_id, f, caption="🔥 *METAL CODES - FULL PACKAGE (.ZIP)*", parse_mode="Markdown")
+        if files_to_send:
+            for f_path in files_to_send:
+                with open(f_path, 'rb') as f:
+                    bot.send_document(chat_id, f, caption=f"🔥 *METAL CODES - {os.path.basename(f_path)}*", parse_mode="Markdown")
+                try: os.remove(f_path)
+                except: pass
+        else:
+            bot.send_message(chat_id, "ℹ️ Gönderilecek dosya bulunamadı veya işlem sırasında kod çekilemedi.")
         
         try: shutil.rmtree(result_mgr.base_folder)
         except: pass
-        if is_zip and files_to_send:
-            try: os.remove(files_to_send[0])
-            except: pass
             
         user_states[chat_id] = "IDLE"
         
@@ -1166,8 +1212,7 @@ def run_code_sorter(chat_id, content):
                 
         formatted_output = tools.format_game_codes_output(game_groups)
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"sorted_codes_{timestamp}.txt"
+        filename = "sorted_codes.txt"
         
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(formatted_output)
@@ -1415,4 +1460,3 @@ if __name__ == "__main__":
         
     print("[DEBUG] Metal Checker v4.0 (Fetcher Edition) Bot Başlatılıyor...")
     bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
-
